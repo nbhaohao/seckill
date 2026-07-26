@@ -42,15 +42,18 @@ func NewNode(nodeID int64) (*Node, error) {
 // NextID 是 p2 的核心：标准雪花算法——41 位毫秒时间戳 + 10 位机器号 + 12 位序列号，
 // 拼成一个全局单调递增（时钟不回拨的前提下）、跨进程不冲突的 int64 订单号。
 func (n *Node) NextID() (int64, error) {
-	panic("TODO: phase p2 - 拼出 时间戳(41)+节点号(10)+序列号(12) 三段式 ID，并处理时钟回拨")
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	now := n.nowFunc()
+	if now < n.lastTs {
+		return 0, fmt.Errorf("idgen: clock moved backwards, refusing to generate id for %dms", n.lastTs-now)
+	}
+
+	panic("TODO: phase p2 S2 - 同毫秒序列号自增 + 三段拼接")
 }
 
 // AI 将在 p2 学习时分切片实现（下面是思路与顺序，不是终稿代码）：
-// 1. n.mu.Lock(); defer n.mu.Unlock() —— 同一个 Node 会被多个 goroutine 共用，seq/lastTs 是共享可变状态
-// 2. now := n.nowFunc()
-// 3. if now < n.lastTs { return 0, fmt.Errorf("idgen: clock moved backwards, refusing to generate id for %dms", n.lastTs-now) }
-//    —— 时钟回拨怎么办：本课选"直接拒绝"而不是"阻塞等到时钟追上"——拒绝更简单也更适合面试讲清楚
-//    权衡（可用性 vs 正确性），阻塞方案的风险（等多久？NTP 大幅跳变时阻塞可能是几秒到几分钟）留给 quiz 展开。
 // 4. if now == n.lastTs {
 //      n.seq = (n.seq + 1) & maxSeq          // 同一毫秒内序列号自增，用 & maxSeq 让它超过 4095 后回卷到 0
 //      if n.seq == 0 {                        // 回卷到 0 说明这一毫秒 4096 个号已经发完
