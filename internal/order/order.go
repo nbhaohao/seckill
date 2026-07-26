@@ -2,6 +2,8 @@ package order
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 
 	"github.com/jmoiron/sqlx"
 
@@ -14,21 +16,31 @@ import (
 // 查询命中走快路径，并发插入撞 1062 时回查第一次写入的订单；
 // ③ 全程包一个事务，中途任何失败都整体回滚，不会出现"扣了库存但没插订单"的半成品状态。
 func PlaceOrderTx(ctx context.Context, db *sqlx.DB, node *idgen.Node, req PlaceOrderRequest) (*Order, error) {
-	panic("TODO: phase p3 - 事务 + FOR UPDATE 行锁 + request_id 幂等，修好 p1 的超卖")
+	if req.Quantity <= 0 {
+		return nil, ErrInvalidQuantity
+	}
+
+	tx, err := db.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// 幂等快路径：REPEATABLE READ 下这是快照读，两个并发事务仍可能同时 miss；
+	// 它只是减少串行重放的工作量，不提供并发幂等保证——真正兜底的是 request_id 唯一索引。
+	var existing Order
+	err = tx.GetContext(ctx, &existing, "SELECT id, product_id, user_id, request_id, quantity, status, created_at FROM orders WHERE request_id = ?", req.RequestID)
+	if err == nil {
+		return &existing, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+
+	panic("TODO: phase p3 S2 - FOR UPDATE 行锁读库存并判断够不够")
 }
 
 // AI 将在 p3 学习时分切片实现（下面是思路与顺序，不是终稿代码）：
-// 1. if req.Quantity <= 0 { return nil, ErrInvalidQuantity }
-// 2. tx, err := db.BeginTxx(ctx, nil)；err != nil 直接返回
-//    defer 里 if 提交失败前的 return 路径都还没 Commit，就 tx.Rollback()（Commit 之后再调用
-//    Rollback 是无害的 no-op，标准写法：defer func() { _ = tx.Rollback() }()，Commit 成功后它啥也不做）
-// 3. 幂等快路径：var existing Order
-//    err = tx.GetContext(ctx, &existing, "SELECT id, product_id, user_id, request_id, quantity, status, created_at FROM orders WHERE request_id = ?", req.RequestID)
-//    - err == nil：说明这个 request_id 已经落过订单了，直接 return &existing, nil（tx 会被 defer 里的
-//      Rollback 清掉，没做任何写操作，这就是"重复提交不产生副作用"的字面意思）
-//    - !errors.Is(err, sql.ErrNoRows)：真正的查询错误，直接 return nil, err
-//    - errors.Is(err, sql.ErrNoRows)：继续往下走。注意：REPEATABLE READ 下这是快照读，两个并发事务
-//      仍可能同时 miss；它只是减少串行重放的工作量，不提供并发幂等保证。
 // 4. var stock int
 //    err = tx.GetContext(ctx, &stock, "SELECT stock FROM products WHERE id = ? FOR UPDATE", req.ProductID)
 //    —— FOR UPDATE 是本关的题眼：这一行从此刻到本事务提交/回滚为止，被排他锁独占，
