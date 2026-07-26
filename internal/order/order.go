@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
 
 	"github.com/nbhaohao/go-seckill/internal/idgen"
@@ -52,18 +53,43 @@ func PlaceOrderTx(ctx context.Context, db *sqlx.DB, node *idgen.Node, req PlaceO
 		return nil, ErrInsufficientStock
 	}
 
-	panic("TODO: phase p3 S3 - 插入订单；识别 1062 后回滚并回查已有订单，否则扣库存并 Commit")
-}
+	id, err := node.NextID()
+	if err != nil {
+		return nil, err
+	}
 
-// AI 将在 p3 学习时分切片实现（下面是思路与顺序，不是终稿代码）：
-// 6. id, err := node.NextID()；err != nil 直接返回
-// 7. o := &Order{ID: id, ProductID: req.ProductID, UserID: req.UserID, RequestID: req.RequestID, Quantity: req.Quantity, Status: "created"}
-//    _, err = tx.ExecContext(ctx, "INSERT INTO orders (id, product_id, user_id, request_id, quantity, status) VALUES (?,?,?,?,?,?)",
-//      o.ID, o.ProductID, o.UserID, o.RequestID, o.Quantity, o.Status)
-//    —— 两个并发事务可能都在第 3 步看到不存在；uk_request_id 才是最终并发闸门。
-//    INSERT 若返回 *mysql.MySQLError 且 Number == 1062：先 Rollback 当前事务，再用 db.GetContext
-//    按 request_id 回查已提交的订单并返回。不要在原 RR 事务里做普通 SELECT：旧快照可能仍看不到赢家事务。
-//    其他 INSERT 错误原样返回。
-// 8. _, err = tx.ExecContext(ctx, "UPDATE products SET stock = stock - ? WHERE id = ?", req.Quantity, req.ProductID)
-// 9. if err := tx.Commit(); err != nil { return nil, err }
-// 10. return o, nil
+	o := &Order{
+		ID:        id,
+		ProductID: req.ProductID,
+		UserID:    req.UserID,
+		RequestID: req.RequestID,
+		Quantity:  req.Quantity,
+		Status:    "created",
+	}
+	// 两个并发事务可能都在幂等快路径那一步看到不存在；uk_request_id 才是最终并发闸门。
+	_, err = tx.ExecContext(ctx, "INSERT INTO orders (id, product_id, user_id, request_id, quantity, status) VALUES (?,?,?,?,?,?)",
+		o.ID, o.ProductID, o.UserID, o.RequestID, o.Quantity, o.Status)
+	if err != nil {
+		var mysqlErr *mysql.MySQLError
+		if errors.As(err, &mysqlErr) && mysqlErr.Number == 1062 {
+			// 我是后到的那个：先结束当前 RR 事务（defer 会做），再用 db（新事务/新快照）
+			// 回查赢家已经提交的那行订单——旧快照可能仍看不到赢家事务，不能在 tx 里查。
+			_ = tx.Rollback()
+			var winner Order
+			if err := db.GetContext(ctx, &winner, "SELECT id, product_id, user_id, request_id, quantity, status, created_at FROM orders WHERE request_id = ?", req.RequestID); err != nil {
+				return nil, err
+			}
+			return &winner, nil
+		}
+		return nil, err
+	}
+
+	if _, err := tx.ExecContext(ctx, "UPDATE products SET stock = stock - ? WHERE id = ?", req.Quantity, req.ProductID); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return o, nil
+}
