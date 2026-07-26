@@ -74,7 +74,13 @@ func (c *ProductCache) Get(ctx context.Context, id int64) (*Product, error) {
 		return UnmarshalProduct(raw)
 	}
 	if errors.Is(err, redis.Nil) {
-		return c.loadAndFill(ctx, id)
+		v, err, _ := c.sf.Do(ProductKey(id), func() (interface{}, error) {
+			return c.loadAndFill(ctx, id)
+		})
+		if err != nil {
+			return nil, err
+		}
+		return v.(*Product), nil
 	}
 	return nil, err
 }
