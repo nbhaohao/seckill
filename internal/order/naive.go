@@ -3,6 +3,7 @@ package order
 import (
 	"context"
 	"database/sql"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -31,15 +32,24 @@ func PlaceOrderNaive(ctx context.Context, db *sqlx.DB, req PlaceOrderRequest) (*
 	// 关键：判断和下一步的写，中间完全没有加锁，这条 if 通过之后到 UPDATE 真正执行之前，
 	// 别的 goroutine 完全可能也读到同一个 stock、也判断"够"，这就是超卖窗口。
 
-	panic("TODO: phase p1 S2 - 扣库存 + 插订单，用来复现超卖")
-}
+	// 注意这条 UPDATE 本身没有 WHERE stock >= quantity 兜底，纯粹翻译"扣库存"这个意图，
+	// 这正是本关要暴露的 bug，先别急着补它。
+	if _, err := db.ExecContext(ctx, "UPDATE products SET stock = stock - ? WHERE id = ?", req.Quantity, req.ProductID); err != nil {
+		return nil, err
+	}
 
-// AI 将在 p1 学习时分切片实现（下面是思路与顺序，不是终稿代码）：
-// 4. _, err = db.ExecContext(ctx, "UPDATE products SET stock = stock - ? WHERE id = ?", req.Quantity, req.ProductID)
-//    —— 注意这条 UPDATE 本身没有 WHERE stock >= quantity 兜底，纯粹翻译"扣库存"这个意图，
-//    这正是本关要暴露的 bug，先别急着补它。
-// 5. o := &Order{ ID: time.Now().UnixNano(), ProductID: req.ProductID, UserID: req.UserID,
-//       RequestID: req.RequestID, Quantity: req.Quantity, Status: "created" }
-//    _, err = db.ExecContext(ctx, "INSERT INTO orders (id, product_id, user_id, request_id, quantity, status) VALUES (?,?,?,?,?,?)",
-//       o.ID, o.ProductID, o.UserID, o.RequestID, o.Quantity, o.Status)
-// 6. 出错就返回 (nil, err)；全部成功返回 (o, nil)
+	o := &Order{
+		ID:        time.Now().UnixNano(),
+		ProductID: req.ProductID,
+		UserID:    req.UserID,
+		RequestID: req.RequestID,
+		Quantity:  req.Quantity,
+		Status:    "created",
+	}
+	if _, err := db.ExecContext(ctx, "INSERT INTO orders (id, product_id, user_id, request_id, quantity, status) VALUES (?,?,?,?,?,?)",
+		o.ID, o.ProductID, o.UserID, o.RequestID, o.Quantity, o.Status); err != nil {
+		return nil, err
+	}
+
+	return o, nil
+}
