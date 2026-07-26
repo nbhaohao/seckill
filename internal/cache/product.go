@@ -67,6 +67,9 @@ func New(rdb *redis.Client, repo ProductRepo, opts Options) *ProductCache {
 func (c *ProductCache) Get(ctx context.Context, id int64) (*Product, error) {
 	raw, err := c.rdb.Get(ctx, ProductKey(id)).Result()
 	if err == nil {
+		if raw == NotFoundPlaceholder {
+			return nil, ErrProductNotFound
+		}
 		return UnmarshalProduct(raw)
 	}
 	if errors.Is(err, redis.Nil) {
@@ -84,6 +87,9 @@ func (c *ProductCache) Get(ctx context.Context, id int64) (*Product, error) {
 func (c *ProductCache) loadAndFill(ctx context.Context, id int64) (*Product, error) {
 	p, err := c.repo.LoadProduct(ctx, id)
 	if err != nil {
+		if errors.Is(err, ErrProductNotFound) {
+			c.rdb.Set(ctx, ProductKey(id), NotFoundPlaceholder, c.opts.MissTTL)
+		}
 		return nil, err
 	}
 
