@@ -82,7 +82,17 @@ func (c *ProductCache) Get(ctx context.Context, id int64) (*Product, error) {
 // 回填失败（Redis 挂了）该不该让整个 Get 失败？这是本 phase 的一个 review 点，
 // 教案会问你：缓存是加速器还是真相源。
 func (c *ProductCache) loadAndFill(ctx context.Context, id int64) (*Product, error) {
-	panic("TODO: phase p1 — AI 将在 p1 学习时分切片实现回源 + 回填")
+	p, err := c.repo.LoadProduct(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	raw, err := MarshalProduct(p)
+	if err == nil {
+		c.rdb.Set(ctx, ProductKey(id), raw, c.opts.TTL)
+	}
+
+	return p, nil
 }
 
 // Warm 是预热：秒杀开始前把已知会被打爆的商品 id 先塞进缓存，
@@ -91,7 +101,17 @@ func (c *ProductCache) loadAndFill(ctx context.Context, id int64) (*Product, err
 // p1 要实现的形状：对每个 id 调一次回源 + 回填（复用 loadAndFill 即可），
 // 遇到不存在的商品跳过、不要让整批预热失败。
 func (c *ProductCache) Warm(ctx context.Context, ids []int64) error {
-	panic("TODO: phase p1 — AI 将在 p1 学习时分切片实现批量预热")
+	for _, id := range ids {
+		_, err := c.loadAndFill(ctx, id)
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, ErrProductNotFound) {
+			continue
+		}
+		return err
+	}
+	return nil
 }
 
 // ttlWithJitter 给回填用的 TTL 加一点随机抖动。
