@@ -80,7 +80,8 @@ func (c *ProductCache) Get(ctx context.Context, id int64) (*Product, error) {
 		if err != nil {
 			return nil, err
 		}
-		return v.(*Product), nil
+		cp := *v.(*Product)
+		return &cp, nil
 	}
 	return nil, err
 }
