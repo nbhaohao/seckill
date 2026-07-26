@@ -41,21 +41,12 @@ func NewProductionServer(addr string, handler http.Handler, db *sql.DB, cfg Serv
 	db.SetMaxIdleConns(cfg.MaxIdleConns)
 	db.SetConnMaxLifetime(cfg.ConnMaxLifetime)
 
-	panic("TODO: phase p4 - 拼出四超时都非零的 http.Server")
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
+		ReadTimeout:       cfg.ReadTimeout,
+		WriteTimeout:      cfg.WriteTimeout,
+		IdleTimeout:       cfg.IdleTimeout,
+	}
 }
-
-// AI 将在 p4 学习时分切片实现（下面是思路与顺序，不是终稿代码）：
-// 1. db.SetMaxOpenConns(cfg.MaxOpenConns)
-//    —— 上限：同一时刻最多多少个连接在跟 MySQL 说话，多出来的请求排队等（体现在 DB.Stats().WaitCount）
-// 2. db.SetMaxIdleConns(cfg.MaxIdleConns)
-//    —— 空闲态最多保留多少个连接不关掉，避免流量抖动时刚放回池子又要重新握手
-// 3. db.SetConnMaxLifetime(cfg.ConnMaxLifetime)
-//    —— 连接活满这么久强制重建，防止连接老死在 MySQL 那一侧的某个中间设备/防火墙的空闲超时策略上
-// 4. return &http.Server{
-//      Addr:              addr,
-//      Handler:           handler,
-//      ReadHeaderTimeout: cfg.ReadHeaderTimeout,  // 只读请求头的时限——防"只发头不发身体"的慢速攻击
-//      ReadTimeout:       cfg.ReadTimeout,        // 读完整个请求（含 body）的时限
-//      WriteTimeout:      cfg.WriteTimeout,       // 写响应的时限
-//      IdleTimeout:       cfg.IdleTimeout,        // keep-alive 空闲连接最多占着不用多久，超时被回收
-//    }
