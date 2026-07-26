@@ -50,18 +50,18 @@ func (n *Node) NextID() (int64, error) {
 		return 0, fmt.Errorf("idgen: clock moved backwards, refusing to generate id for %dms", n.lastTs-now)
 	}
 
-	panic("TODO: phase p2 S2 - 同毫秒序列号自增 + 三段拼接")
-}
+	if now == n.lastTs {
+		n.seq = (n.seq + 1) & maxSeq // 同一毫秒内序列号自增，用 & maxSeq 让它超过 4095 后回卷到 0
+		if n.seq == 0 {              // 回卷到 0 说明这一毫秒 4096 个号已经发完
+			for now <= n.lastTs { // 忙等到下一毫秒，避免同毫秒内 ID 重复
+				now = n.nowFunc()
+			}
+		}
+	} else {
+		n.seq = 0 // 换了一个新的毫秒，序列号从 0 重新计
+	}
 
-// AI 将在 p2 学习时分切片实现（下面是思路与顺序，不是终稿代码）：
-// 4. if now == n.lastTs {
-//      n.seq = (n.seq + 1) & maxSeq          // 同一毫秒内序列号自增，用 & maxSeq 让它超过 4095 后回卷到 0
-//      if n.seq == 0 {                        // 回卷到 0 说明这一毫秒 4096 个号已经发完
-//        for now <= n.lastTs { now = n.nowFunc() }  // 忙等到下一毫秒，避免同毫秒内 ID 重复
-//      }
-//    } else {
-//      n.seq = 0                              // 换了一个新的毫秒，序列号从 0 重新计
-//    }
-// 5. n.lastTs = now
-// 6. id := ((now - epochMilli) << timeShift) | (n.nodeID << nodeShift) | n.seq
-// 7. return id, nil
+	n.lastTs = now
+	id := ((now - epochMilli) << timeShift) | (n.nodeID << nodeShift) | n.seq
+	return id, nil
+}
