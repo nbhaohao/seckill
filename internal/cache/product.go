@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -64,7 +65,14 @@ func New(rdb *redis.Client, repo ProductRepo, opts Options) *ProductCache {
 //
 // p2 / p3 会继续在这个方法上加工，届时 AI 会分切片改它——p1 只做上面三步。
 func (c *ProductCache) Get(ctx context.Context, id int64) (*Product, error) {
-	panic("TODO: phase p1 — AI 将在 p1 学习时分切片实现 cache-aside 读路径")
+	raw, err := c.rdb.Get(ctx, ProductKey(id)).Result()
+	if err == nil {
+		return UnmarshalProduct(raw)
+	}
+	if errors.Is(err, redis.Nil) {
+		return c.loadAndFill(ctx, id)
+	}
+	return nil, err
 }
 
 // loadAndFill 是 Get 的"未命中"分支：回源 DB + 回填缓存。
