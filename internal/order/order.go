@@ -37,16 +37,25 @@ func PlaceOrderTx(ctx context.Context, db *sqlx.DB, node *idgen.Node, req PlaceO
 		return nil, err
 	}
 
-	panic("TODO: phase p3 S2 - FOR UPDATE 行锁读库存并判断够不够")
+	// FOR UPDATE 是本关的题眼：这一行从此刻到本事务提交/回滚为止，被排他锁独占，
+	// 别的事务想读同一行的 FOR UPDATE 或想 UPDATE 它，都会被阻塞在这里排队，p1 的并发读窗口被物理堵死。
+	var stock int
+	err = tx.GetContext(ctx, &stock, "SELECT stock FROM products WHERE id = ? FOR UPDATE", req.ProductID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrProductNotFound
+		}
+		return nil, err
+	}
+
+	if stock < req.Quantity {
+		return nil, ErrInsufficientStock
+	}
+
+	panic("TODO: phase p3 S3 - 插入订单；识别 1062 后回滚并回查已有订单，否则扣库存并 Commit")
 }
 
 // AI 将在 p3 学习时分切片实现（下面是思路与顺序，不是终稿代码）：
-// 4. var stock int
-//    err = tx.GetContext(ctx, &stock, "SELECT stock FROM products WHERE id = ? FOR UPDATE", req.ProductID)
-//    —— FOR UPDATE 是本关的题眼：这一行从此刻到本事务提交/回滚为止，被排他锁独占，
-//    别的事务想读同一行的 FOR UPDATE 或想 UPDATE 它，都会被阻塞在这里排队，p1 的并发读窗口被物理堵死。
-//    sql.ErrNoRows 时返回 ErrProductNotFound，其他 err 直接返回
-// 5. if stock < req.Quantity { return nil, ErrInsufficientStock }（tx 交给 defer 回滚）
 // 6. id, err := node.NextID()；err != nil 直接返回
 // 7. o := &Order{ID: id, ProductID: req.ProductID, UserID: req.UserID, RequestID: req.RequestID, Quantity: req.Quantity, Status: "created"}
 //    _, err = tx.ExecContext(ctx, "INSERT INTO orders (id, product_id, user_id, request_id, quantity, status) VALUES (?,?,?,?,?,?)",
