@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"errors"
+	"math/rand"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -95,7 +96,7 @@ func (c *ProductCache) loadAndFill(ctx context.Context, id int64) (*Product, err
 
 	raw, err := MarshalProduct(p)
 	if err == nil {
-		c.rdb.Set(ctx, ProductKey(id), raw, c.opts.TTL)
+		c.rdb.Set(ctx, ProductKey(id), raw, c.ttlWithJitter())
 	}
 
 	return p, nil
@@ -125,7 +126,10 @@ func (c *ProductCache) Warm(ctx context.Context, ids []int64) error {
 // TTLJitter 为 0 时就退化成 opts.TTL 本身。
 // 为什么需要它，见 p2 教案（关键词：同一批 key 同时过期）。
 func (c *ProductCache) ttlWithJitter() time.Duration {
-	panic("TODO: phase p2 — AI 将在 p2 学习时实现 TTL 抖动")
+	if c.opts.TTLJitter <= 0 {
+		return c.opts.TTL
+	}
+	return c.opts.TTL + time.Duration(rand.Int63n(int64(c.opts.TTLJitter)))
 }
 
 // UpdateStock 是写路径：改库存。
