@@ -37,7 +37,11 @@ func DefaultServerConfig() ServerConfig {
 // 显式配置上去，再拼出一个把四个超时都显式设置了的 *http.Server——两件事一次做完，因为它们
 // 服务同一个目的：把"默认值等于无限"这件事从整条请求链路上彻底移除。
 func NewProductionServer(addr string, handler http.Handler, db *sql.DB, cfg ServerConfig) *http.Server {
-	panic("TODO: phase p4 - 配置 DB 连接池三参数 + 拼出四超时都非零的 http.Server")
+	db.SetMaxOpenConns(cfg.MaxOpenConns)
+	db.SetMaxIdleConns(cfg.MaxIdleConns)
+	db.SetConnMaxLifetime(cfg.ConnMaxLifetime)
+
+	panic("TODO: phase p4 - 拼出四超时都非零的 http.Server")
 }
 
 // AI 将在 p4 学习时分切片实现（下面是思路与顺序，不是终稿代码）：
