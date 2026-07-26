@@ -1,5 +1,5 @@
-# m01 只需要 mysql；redis/kafka 是给 m02+ 预配的占位，挂在 profiles: ["future"] 下——
-# `docker compose up -d` 默认不会启动它们，m01 的任何测试/脚本都不依赖这两个服务。
+# m01 只需要 mysql；m02（缓存层）起 mysql + redis；kafka 仍挂在 profiles: ["future"] 下——
+# `docker compose up -d` 默认不会启动它，m04 削峰再摘掉那行 profiles。
 # 版本锁定（COURSE_SPEC 开工前 checklist 核过官方最新稳定 tag）：
 #   MySQL 8.4.10 · Redis 7.4.9 · Kafka 4.3.1（KRaft 单节点，无需 ZooKeeper）。
 services:
@@ -26,7 +26,11 @@ services:
     restart: unless-stopped
     ports:
       - "6379:6379"
-    profiles: ["future"] # m02 缓存层再启用
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
 
   kafka:
     image: apache/kafka:4.3.1

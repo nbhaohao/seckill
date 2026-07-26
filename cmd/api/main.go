@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -13,10 +14,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/nbhaohao/go-seckill/internal/cache"
 	"github.com/nbhaohao/go-seckill/internal/dbconn"
 	"github.com/nbhaohao/go-seckill/internal/idgen"
 	"github.com/nbhaohao/go-seckill/internal/metrics"
 	"github.com/nbhaohao/go-seckill/internal/order"
+	"github.com/nbhaohao/go-seckill/internal/redisconn"
 	"github.com/nbhaohao/go-seckill/internal/server"
 )
 
@@ -65,6 +68,26 @@ func main() {
 		log.Fatalf("register metrics: %v", err)
 	}
 
+	// m02 缓存层接线：Redis 客户端 + 回源计数器 + ProductCache。
+	// 连不上 Redis 就直接退出——m02 起，商品读路径依赖它（m01 的下单接口不受影响，但服务启动是同一个进程）。
+	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	rdb, err := redisconn.Open(rctx, redisconn.Config{
+		Addr:     envOr("REDIS_ADDR", "127.0.0.1:6379"),
+		Password: envOr("REDIS_PASSWORD", ""),
+		DB:       envIntOr("REDIS_DB", 0),
+	})
+	rcancel()
+	if err != nil {
+		log.Fatalf("connect redis: %v（先 docker compose up -d redis）", err)
+	}
+	defer func() { _ = rdb.Close() }()
+
+	productRepo := cache.NewCountingRepo(cache.NewSQLProductRepo(db))
+	productCache := cache.New(rdb, productRepo, cache.DefaultOptions())
+	if err := metrics.RegisterCacheDBLoads(prometheus.DefaultRegisterer, productRepo.Loads); err != nil {
+		log.Fatalf("register cache metrics: %v", err)
+	}
+
 	r := gin.New()
 	r.Use(gin.Recovery())
 
@@ -81,6 +104,82 @@ func main() {
 		var stock int
 		if err := db.GetContext(c.Request.Context(), &stock, "SELECT stock FROM products WHERE id = ?", id); err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"id": id, "stock": stock})
+	})
+
+	// ===== m02 商品读路径：/products/:id 走缓存，/debug/products/:id/nocache 直连 DB =====
+	// 两个 handler 的 SQL 完全相同（都走 cache.SQLProductRepo.LoadProduct），
+	// 唯一差别就是前面有没有那层缓存——这才能让 p5 的 on/off 对比只剩一个变量。
+	r.GET("/products/:id", func(c *gin.Context) {
+		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "bad id"})
+			return
+		}
+		start := time.Now()
+		p, err := productCache.Get(c.Request.Context(), id)
+		metrics.ProductReads.WithLabelValues("cached").Inc()
+		metrics.ProductReadLatency.WithLabelValues("cached").Observe(time.Since(start).Seconds())
+		switch {
+		case err == nil:
+			c.JSON(http.StatusOK, p)
+		case errors.Is(err, cache.ErrProductNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+	})
+
+	r.GET("/debug/products/:id/nocache", func(c *gin.Context) {
+		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "bad id"})
+			return
+		}
+		start := time.Now()
+		p, err := cache.NewSQLProductRepo(db).LoadProduct(c.Request.Context(), id)
+		metrics.ProductReads.WithLabelValues("nocache").Inc()
+		metrics.ProductReadLatency.WithLabelValues("nocache").Observe(time.Since(start).Seconds())
+		switch {
+		case err == nil:
+			c.JSON(http.StatusOK, p)
+		case errors.Is(err, cache.ErrProductNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+	})
+
+	// /debug/cache/warm/:id 预热单个商品；/debug/products/:id/stock 改库存（先更库再删缓存）。
+	// 两个都是给 m02 的观察脚本用的最小接口，不是业务 API。
+	r.POST("/debug/cache/warm/:id", func(c *gin.Context) {
+		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "bad id"})
+			return
+		}
+		if err := productCache.Warm(c.Request.Context(), []int64{id}); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"warmed": id})
+	})
+
+	r.POST("/debug/products/:id/stock", func(c *gin.Context) {
+		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "bad id"})
+			return
+		}
+		stock, err := strconv.Atoi(c.Query("stock"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "bad stock"})
+			return
+		}
+		if err := productCache.UpdateStock(c.Request.Context(), id, stock); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"id": id, "stock": stock})
