@@ -148,5 +148,8 @@ func (c *ProductCache) UpdateStock(ctx context.Context, id int64, stock int) err
 	if err := c.repo.UpdateStock(ctx, id, stock); err != nil {
 		return err
 	}
+	if err := c.rdb.Del(ctx, ProductKey(id)).Err(); err != nil {
+		return err
+	}
 	return nil
 }
