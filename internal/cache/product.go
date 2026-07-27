@@ -145,5 +145,8 @@ func (c *ProductCache) ttlWithJitter() time.Duration {
 // 两个顺序问题都会在 p4 教案里被追问：为什么是"先更库再删缓存"而不是反过来，
 // 以及为什么是"删"而不是"把新值写进缓存"。
 func (c *ProductCache) UpdateStock(ctx context.Context, id int64, stock int) error {
-	panic("TODO: phase p4 — AI 将在 p4 学习时分切片实现先更库再删缓存")
+	if err := c.repo.UpdateStock(ctx, id, stock); err != nil {
+		return err
+	}
+	return nil
 }
