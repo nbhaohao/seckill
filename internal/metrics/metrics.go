@@ -37,11 +37,34 @@ var (
 		Help:    "商品读请求耗时分布（path=cached|nocache）。",
 		Buckets: prometheus.DefBuckets,
 	}, []string{"path"})
+
+	// DeductOutcomes / DeductLatency（m03）：四条防超卖路径的结果与耗时。
+	// approach=pessimistic|cas|conditional|lock|lua，result=success|insufficient|conflict|error。
+	// p5 的对比表就是拿同一个 workload 下这两组数字横着摆开——注意 result 必须分得够细：
+	// 把"卖光了"和"被抢先了"混成一类，就再也说不清某个方案到底是慢还是废。
+	DeductOutcomes = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "seckill_deduct_outcomes_total",
+		Help: "防超卖各方案的下单结果计数（approach=pessimistic|cas|conditional|lock|lua）。",
+	}, []string{"approach", "result"})
+
+	DeductLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "seckill_deduct_latency_seconds",
+		Help:    "防超卖各方案的下单耗时分布（approach 同上）。",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"approach"})
+
+	// CASAttempts（m03 p1）：乐观锁累计 CAS 尝试次数。
+	// 它除以 cas 那一列的请求数就是"平均每单重试了几次"——乐观锁在高竞争下的代价，
+	// 只有这个数字能量化，光看 QPS 看不出来。
+	CASAttempts = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "seckill_cas_attempts_total",
+		Help: "版本号 CAS 累计尝试次数（含失败重试），m03 p1 的冲突率来源。",
+	})
 )
 
 // Register 把业务指标 + DB 连接池指标一次性挂到给定 registry 上，cmd/api/main.go 启动时调用一次。
 func Register(reg prometheus.Registerer, db *sql.DB) error {
-	for _, c := range []prometheus.Collector{OrdersPlaced, OrderLatency, ProductReads, ProductReadLatency} {
+	for _, c := range []prometheus.Collector{OrdersPlaced, OrderLatency, ProductReads, ProductReadLatency, DeductOutcomes, DeductLatency, CASAttempts} {
 		if err := reg.Register(c); err != nil {
 			return err
 		}

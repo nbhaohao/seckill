@@ -16,6 +16,7 @@ import (
 
 	"github.com/nbhaohao/go-seckill/internal/cache"
 	"github.com/nbhaohao/go-seckill/internal/dbconn"
+	"github.com/nbhaohao/go-seckill/internal/deduct"
 	"github.com/nbhaohao/go-seckill/internal/idgen"
 	"github.com/nbhaohao/go-seckill/internal/metrics"
 	"github.com/nbhaohao/go-seckill/internal/order"
@@ -44,6 +45,16 @@ type placeOrderBody struct {
 	ProductID int64  `json:"product_id" binding:"required"`
 	UserID    int64  `json:"user_id" binding:"required"`
 	Quantity  int    `json:"quantity" binding:"required"`
+}
+
+// deductOrderBody 是 m03 压测端点的入参：只有 product_id 必填。
+// request_id 留空表示"让服务端生成一个新的"，quantity 留空按 1 算——
+// 压测器重放同一份 body 时才不会退化成幂等重放。
+type deductOrderBody struct {
+	RequestID string `json:"request_id"`
+	ProductID int64  `json:"product_id" binding:"required"`
+	UserID    int64  `json:"user_id"`
+	Quantity  int    `json:"quantity"`
 }
 
 func main() {
@@ -231,6 +242,93 @@ func main() {
 		default:
 			metrics.OrdersPlaced.WithLabelValues("error").Inc()
 			metrics.OrderLatency.WithLabelValues("error").Observe(time.Since(start).Seconds())
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+	})
+
+	// ===== m03 防超卖四方案：/debug/orders/:approach =====
+	// 四条路径做的是同一件业务（下一单），唯一差别是"扣库存"那一步用什么机制护住，
+	// p5 的对比表才只剩一个变量。approach=pessimistic 就是 m01 那条 FOR UPDATE 基线。
+	// /debug/deduct/warm/:id 把 DB 库存灌进 Redis，是 lua 那条路径的前提。
+	r.POST("/debug/deduct/warm/:id", func(c *gin.Context) {
+		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "bad id"})
+			return
+		}
+		if err := deduct.WarmStock(c.Request.Context(), rdb, db, id); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"warmed": id})
+	})
+
+	r.POST("/debug/orders/:approach", func(c *gin.Context) {
+		var body deductOrderBody
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		approach := c.Param("approach")
+		// 压测时 vegeta 反复重放同一份 body，request_id 只能由服务端现生成——
+		// 否则每一发都撞 orders.uk_request_id，测到的就成了 m01 的幂等快路径而不是扣减机制。
+		requestID := body.RequestID
+		if requestID == "" {
+			id, err := node.NextID()
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			requestID = strconv.FormatInt(id, 10)
+		}
+		quantity := body.Quantity
+		if quantity == 0 {
+			quantity = 1
+		}
+		req := order.PlaceOrderRequest{
+			RequestID: requestID,
+			ProductID: body.ProductID,
+			UserID:    body.UserID,
+			Quantity:  quantity,
+		}
+
+		ctx := c.Request.Context()
+		start := time.Now()
+		var o *order.Order
+		var err error
+		switch approach {
+		case "pessimistic":
+			o, err = order.PlaceOrderTx(ctx, db, node, req)
+		case "cas":
+			var attempts int
+			o, attempts, err = deduct.PlaceOrderByVersionCAS(ctx, db, node, req)
+			metrics.CASAttempts.Add(float64(attempts))
+		case "conditional":
+			o, err = deduct.PlaceOrderByConditionalUpdate(ctx, db, node, req)
+		case "lock":
+			o, err = deduct.PlaceOrderWithLock(ctx, rdb, db, node, req, deduct.DefaultLockOptions())
+		case "lua":
+			o, err = deduct.PlaceOrderWithPreDeduct(ctx, rdb, db, node, req)
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": "unknown approach: " + approach})
+			return
+		}
+		metrics.DeductLatency.WithLabelValues(approach).Observe(time.Since(start).Seconds())
+
+		switch {
+		case err == nil:
+			metrics.DeductOutcomes.WithLabelValues(approach, "success").Inc()
+			c.JSON(http.StatusOK, o)
+		case errors.Is(err, order.ErrInsufficientStock):
+			metrics.DeductOutcomes.WithLabelValues(approach, "insufficient").Inc()
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		case errors.Is(err, deduct.ErrCASRetriesExhausted), errors.Is(err, deduct.ErrLockNotAcquired):
+			// 这两个不是"卖光了"，是"竞争太激烈，这一发没轮上"——单独一类，
+			// 否则对比表里会把方案的退化伪装成正常的售罄。
+			metrics.DeductOutcomes.WithLabelValues(approach, "conflict").Inc()
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		default:
+			metrics.DeductOutcomes.WithLabelValues(approach, "error").Inc()
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		}
 	})
