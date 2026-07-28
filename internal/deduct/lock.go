@@ -72,8 +72,10 @@ func newToken() (string, error) {
 //
 // KEYS[1] = 锁的 key，ARGV[1] = 自己的 token；返回 1 表示删掉了、0 表示这把锁不是自己的。
 var releaseScript = redis.NewScript(`
--- TODO: phase p2 — AI 将在 p2 学习时实现「比对 token 再删」
-return redis.error_reply("TODO: phase p2 releaseScript not implemented")
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+	return redis.call('DEL', KEYS[1])
+end
+return 0
 `)
 
 // renewScript 是 p3 要写的 Lua：比对 token，确认锁还是自己的才续期。
@@ -112,7 +114,14 @@ func Acquire(ctx context.Context, rdb *redis.Client, key string, ttl time.Durati
 // 返回 1 表示删成功；返回 0 表示 Redis 里那把锁已经不是自己的了——这不是"释放失败"，
 // 是"我的锁早就没了"，应当返回 ErrLockLost 让调用方知道临界区可能已经被别人闯入过。
 func (l *Lock) Release(ctx context.Context) error {
-	panic("TODO: phase p2 — AI 将在 p2 学习时分切片实现 Lua 原子释放")
+	n, err := releaseScript.Run(ctx, l.rdb, []string{l.key}, l.token).Int()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrLockLost
+	}
+	return nil
 }
 
 // StartWatchdog 是 p3：给这把锁开一个续期心跳，让长临界区不至于中途丢锁。
