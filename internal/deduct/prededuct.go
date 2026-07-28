@@ -29,8 +29,15 @@ import (
 // key 不存在时也要按"不足"处理：预扣的前提是 WarmStock 已经把库存灌进来了，
 // key 不在说明这个商品根本没开卖，放行就等于凭空造货。
 var preDeductScript = redis.NewScript(`
--- TODO: phase p4 — AI 将在 p4 学习时实现「判断 + 扣减」的原子脚本
-return redis.error_reply("TODO: phase p4 preDeductScript not implemented")
+if redis.call('EXISTS', KEYS[1]) == 0 then
+	return -1
+end
+local stock = tonumber(redis.call('GET', KEYS[1]))
+local qty = tonumber(ARGV[1])
+if stock < qty then
+	return -1
+end
+return redis.call('DECRBY', KEYS[1], qty)
 `)
 
 // rollbackScript 是 p4 S2 要写的 Lua：把预扣的量还回去。
@@ -48,7 +55,14 @@ return redis.error_reply("TODO: phase p4 rollbackScript not implemented")
 // 要实现的形状：preDeductScript.Run(ctx, rdb, []string{StockKey(productID)}, qty)，
 // 取出返回的整数——是 -1 就返回 ErrInsufficientStock，否则把它当作剩余库存返回。
 func PreDeduct(ctx context.Context, rdb *redis.Client, productID int64, qty int) (remaining int64, err error) {
-	panic("TODO: phase p4 — AI 将在 p4 学习时分切片实现 Lua 原子预扣")
+	n, err := preDeductScript.Run(ctx, rdb, []string{StockKey(productID)}, qty).Int64()
+	if err != nil {
+		return 0, err
+	}
+	if n == -1 {
+		return 0, ErrInsufficientStock
+	}
+	return n, nil
 }
 
 // RollbackPreDeduct 是 p4 S2 的补偿动作：跑 rollbackScript 把量还回去。
