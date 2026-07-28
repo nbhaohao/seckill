@@ -2,6 +2,8 @@ package deduct
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 
 	"github.com/jmoiron/sqlx"
 
@@ -30,7 +32,64 @@ import (
 // 返回值里的 attempts 是本关的证据：它就是"这一单一共尝试了几次 CAS"，
 // 测试会把它汇总成冲突率打印出来。
 func PlaceOrderByVersionCAS(ctx context.Context, db *sqlx.DB, node *idgen.Node, req order.PlaceOrderRequest) (*order.Order, int, error) {
-	panic("TODO: phase p1 — AI 将在 p1 学习时分切片实现版本号 CAS 乐观锁")
+	if err := validateRequest(req); err != nil {
+		return nil, 0, err
+	}
+
+	for attempts := 1; attempts <= MaxCASRetries; attempts++ {
+		tx, err := db.BeginTxx(ctx, nil)
+		if err != nil {
+			return nil, attempts, err
+		}
+
+		var product struct {
+			Stock   int `db:"stock"`
+			Version int `db:"version"`
+		}
+		err = tx.GetContext(ctx, &product,
+			"SELECT stock, version FROM products WHERE id = ?", req.ProductID)
+		if errors.Is(err, sql.ErrNoRows) {
+			_ = tx.Rollback()
+			return nil, attempts, ErrProductNotFound
+		}
+		if err != nil {
+			_ = tx.Rollback()
+			return nil, attempts, err
+		}
+		if product.Stock < req.Quantity {
+			_ = tx.Rollback()
+			return nil, attempts, ErrInsufficientStock
+		}
+
+		result, err := tx.ExecContext(ctx,
+			"UPDATE products SET stock = stock - ?, version = version + 1 WHERE id = ? AND version = ?",
+			req.Quantity, req.ProductID, product.Version)
+		if err != nil {
+			_ = tx.Rollback()
+			return nil, attempts, err
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			_ = tx.Rollback()
+			return nil, attempts, err
+		}
+		if rows == 0 {
+			_ = tx.Rollback()
+			continue
+		}
+
+		o, err := insertOrderTx(ctx, tx, node, req)
+		if err != nil {
+			_ = tx.Rollback()
+			return nil, attempts, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, attempts, err
+		}
+		return o, attempts, nil
+	}
+
+	return nil, MaxCASRetries, ErrCASRetriesExhausted
 }
 
 // PlaceOrderByConditionalUpdate 是 p1 S2：条件更新形态（秒杀实战里更常见的那个写法）。
