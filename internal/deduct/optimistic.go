@@ -104,5 +104,39 @@ func PlaceOrderByVersionCAS(ctx context.Context, db *sqlx.DB, node *idgen.Node, 
 // 这里没有重试循环，也没有 version 列——为什么它不需要，以及它比 S1 少拿到了什么信息，
 // 是本切片的 review 点。
 func PlaceOrderByConditionalUpdate(ctx context.Context, db *sqlx.DB, node *idgen.Node, req order.PlaceOrderRequest) (*order.Order, error) {
-	panic("TODO: phase p1 — AI 将在 p1 学习时分切片实现条件更新形态")
+	if err := validateRequest(req); err != nil {
+		return nil, err
+	}
+
+	tx, err := db.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := tx.ExecContext(ctx,
+		"UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?",
+		req.Quantity, req.ProductID, req.Quantity)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	if rows == 0 {
+		_ = tx.Rollback()
+		return nil, ErrInsufficientStock
+	}
+
+	o, err := insertOrderTx(ctx, tx, node, req)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return o, nil
 }
