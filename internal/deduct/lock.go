@@ -174,6 +174,11 @@ func PlaceOrderWithLock(ctx context.Context, rdb *redis.Client, db *sqlx.DB, nod
 	}
 	defer lock.Release(ctx)
 
+	if opts.Watchdog {
+		stop := lock.StartWatchdog(opts.WatchdogInterval)
+		defer stop()
+	}
+
 	tx, err := db.BeginTxx(ctx, nil)
 	if err != nil {
 		return nil, err
