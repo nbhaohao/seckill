@@ -3,7 +3,9 @@ package deduct
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -144,5 +146,50 @@ func (l *Lock) StartWatchdog(interval time.Duration) (stop func()) {
 //
 // opts.Watchdog 在 p2 阶段固定是 false，p3 会把看门狗接进来。
 func PlaceOrderWithLock(ctx context.Context, rdb *redis.Client, db *sqlx.DB, node *idgen.Node, req order.PlaceOrderRequest, opts LockOptions) (*order.Order, error) {
-	panic("TODO: phase p2 — AI 将在 p2 学习时分切片实现锁内扣减")
+	if err := validateRequest(req); err != nil {
+		return nil, err
+	}
+
+	lock, err := Acquire(ctx, rdb, LockKey(req.ProductID), opts.TTL)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Release(ctx)
+
+	tx, err := db.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var stock int
+	err = tx.GetContext(ctx, &stock, "SELECT stock FROM products WHERE id = ?", req.ProductID)
+	if errors.Is(err, sql.ErrNoRows) {
+		_ = tx.Rollback()
+		return nil, ErrProductNotFound
+	}
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	if stock < req.Quantity {
+		_ = tx.Rollback()
+		return nil, ErrInsufficientStock
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE products SET stock = stock - ? WHERE id = ?",
+		req.Quantity, req.ProductID); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+
+	o, err := insertOrderTx(ctx, tx, node, req)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return o, nil
 }
