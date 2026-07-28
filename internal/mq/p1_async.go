@@ -2,20 +2,28 @@ package mq
 
 import (
 	"context"
+	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/redis/go-redis/v9"
 	"github.com/twmb/franz-go/pkg/kgo"
 
+	"github.com/nbhaohao/go-seckill/internal/deduct"
 	"github.com/nbhaohao/go-seckill/internal/idgen"
 	"github.com/nbhaohao/go-seckill/internal/order"
 )
+
+// rollbackTimeout bounds the compensating RollbackPreDeduct call with its own
+// deadline; it must not reuse the caller ctx that just expired on ProduceSync.
+const rollbackTimeout = 2 * time.Second
 
 // NewProducer is m04 p1 S1. AI will implement it during p1.
 //  1. SeedBrokers makes bootstrap addresses explicit; metadata still decides
 //     the final leader, so this list is not a permanent broker routing table.
 func NewProducer(brokers ...string) (*kgo.Client, error) {
-	panic("TODO: phase p1") // AI 将在 p1 S1 按上面的 why 边界实现。
+	return kgo.NewClient(kgo.SeedBrokers(brokers...))
 }
 
 // NewConsumer is m04 p1 S2. AI will implement it during p1.
@@ -33,7 +41,37 @@ func NewConsumer(group, topic string, brokers ...string) (*kgo.Client, error) {
 //  4. Produce failure must compensate the successful pre-deduction; this still
 //     cannot close the process-crash window and is intentionally not an outbox.
 func EnqueueOrder(ctx context.Context, rdb *redis.Client, producer *kgo.Client, topic string, req order.PlaceOrderRequest) (*AcceptedOrder, error) {
-	panic("TODO: phase p1") // AI 将在 p1 S1 按上面的 why 边界实现。
+	if _, err := deduct.PreDeduct(ctx, rdb, req.ProductID, req.Quantity); err != nil {
+		return nil, err
+	}
+
+	acceptedAt := time.Now()
+	value, err := encodeOrderCreated(req, acceptedAt)
+	if err != nil {
+		rollbackPreDeduct(rdb, req)
+		return nil, err
+	}
+
+	record := &kgo.Record{
+		Topic: topic,
+		Key:   []byte(strconv.FormatInt(req.ProductID, 10)),
+		Value: value,
+	}
+	if err := producer.ProduceSync(ctx, record).FirstErr(); err != nil {
+		rollbackPreDeduct(rdb, req)
+		return nil, err
+	}
+
+	return &AcceptedOrder{RequestID: req.RequestID, Status: http.StatusAccepted, Accepted: acceptedAt}, nil
+}
+
+// rollbackPreDeduct compensates a successful PreDeduct on its own short
+// context; the caller's ctx may have just expired on ProduceSync, and reusing
+// it here would make go-redis reject the command before it reaches the wire.
+func rollbackPreDeduct(rdb *redis.Client, req order.PlaceOrderRequest) {
+	ctx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
+	defer cancel()
+	_ = deduct.RollbackPreDeduct(ctx, rdb, req.ProductID, req.Quantity)
 }
 
 // PollOne is m04 p1 S2. AI will implement it during p1.
