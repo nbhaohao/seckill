@@ -83,8 +83,10 @@ return 0
 // renewScript 是 p3 要写的 Lua：比对 token，确认锁还是自己的才续期。
 // 和 releaseScript 是同一个道理——"确认所有权"和"动这把锁"之间不能有窗口。
 var renewScript = redis.NewScript(`
--- TODO: phase p3 — AI 将在 p3 学习时实现「比对 token 再续期」
-return redis.error_reply("TODO: phase p3 renewScript not implemented")
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+	return redis.call('PEXPIRE', KEYS[1], ARGV[2])
+end
+return 0
 `)
 
 // Acquire 是 p2 S1：抢锁。
@@ -132,7 +134,23 @@ func (l *Lock) Release(ctx context.Context) error {
 // 返回一个 stop 函数，调用方用完锁必须调它把 goroutine 收掉（否则就是 goroutine 泄漏）。
 // 续期发现锁已经不是自己的（脚本返回 0）时，看门狗应该停下——继续顶一把别人的锁没有意义。
 func (l *Lock) StartWatchdog(interval time.Duration) (stop func()) {
-	panic("TODO: phase p3 — AI 将在 p3 学习时实现续期看门狗")
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				n, err := renewScript.Run(context.Background(), l.rdb, []string{l.key}, l.token, l.ttl.Milliseconds()).Int()
+				if err != nil || n == 0 {
+					return
+				}
+			}
+		}
+	}()
+	return func() { close(done) }
 }
 
 // PlaceOrderWithLock 是 p2 S3：用分布式锁保护「读库存 → 判断 → 扣减 → 插订单」。
