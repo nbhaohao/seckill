@@ -92,7 +92,18 @@ return redis.error_reply("TODO: phase p3 renewScript not implemented")
 // 两个必须一次做完的原因在 review 时会被追问：如果先 SETNX 再单独 EXPIRE，
 // 中间崩一下会留下什么状态。
 func Acquire(ctx context.Context, rdb *redis.Client, key string, ttl time.Duration) (*Lock, error) {
-	panic("TODO: phase p2 — AI 将在 p2 学习时分切片实现 SET NX PX 抢锁")
+	token, err := newToken()
+	if err != nil {
+		return nil, err
+	}
+	ok, err := rdb.SetNX(ctx, key, token, ttl).Result()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrLockNotAcquired
+	}
+	return &Lock{rdb: rdb, key: key, token: token, ttl: ttl}, nil
 }
 
 // Release 是 p2 S2：释放自己的那把锁。
