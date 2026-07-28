@@ -3,22 +3,26 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/nbhaohao/go-seckill/internal/cache"
 	"github.com/nbhaohao/go-seckill/internal/dbconn"
 	"github.com/nbhaohao/go-seckill/internal/deduct"
 	"github.com/nbhaohao/go-seckill/internal/idgen"
 	"github.com/nbhaohao/go-seckill/internal/metrics"
+	"github.com/nbhaohao/go-seckill/internal/mq"
 	"github.com/nbhaohao/go-seckill/internal/order"
 	"github.com/nbhaohao/go-seckill/internal/redisconn"
 	"github.com/nbhaohao/go-seckill/internal/server"
@@ -92,6 +96,60 @@ func main() {
 		log.Fatalf("connect redis: %v（先 docker compose up -d redis）", err)
 	}
 	defer func() { _ = rdb.Close() }()
+
+	// m04 Kafka 胶水（已就位，AI 生成）：核心机制都留在 internal/mq 的 phase TODO。
+	// API 只负责把最终形态接起来：202 接单、manual commit、有限重试与 lag gauge。
+	brokers := strings.Split(envOr("KAFKA_BROKERS", "127.0.0.1:9092"), ",")
+	orderTopic := envOr("KAFKA_TOPIC", mq.OrderCreatedTopic)
+	dltTopic := envOr("KAFKA_DLT_TOPIC", mq.OrderCreatedDLT)
+	consumerGroup := envOr("KAFKA_GROUP", "seckill-order-writer")
+	producer, err := mq.NewProducer(brokers...)
+	if err != nil {
+		log.Fatalf("new Kafka producer: %v", err)
+	}
+	defer producer.Close()
+	consumer, err := mq.NewManualCommitConsumer(consumerGroup, orderTopic, brokers...)
+	if err != nil {
+		log.Fatalf("new Kafka consumer: %v", err)
+	}
+	defer consumer.Close()
+	if err := mq.RegisterLagGauge(prometheus.DefaultRegisterer, producer, consumerGroup); err != nil {
+		log.Fatalf("register Kafka lag gauge: %v", err)
+	}
+	go func() {
+		for {
+			pollCtx, pollCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			records, err := mq.PollBatch(pollCtx, consumer)
+			pollCancel()
+			if err != nil {
+				if errors.Is(err, context.DeadlineExceeded) {
+					continue
+				}
+				log.Printf("poll order.created: %v", err)
+				continue
+			}
+			for _, record := range records {
+				processCtx, processCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_, outcome, err := mq.ProcessWithRetry(processCtx, producer, dltTopic, record, mq.RetryPolicy{MaxAttempts: 3, BaseBackoff: 100 * time.Millisecond}, func(ctx context.Context, record *kgo.Record) (*order.Order, error) {
+					return mq.PlaceRecord(ctx, db, node, record)
+				})
+				processCancel()
+				if err != nil {
+					log.Printf("process order.created topic=%s partition=%d offset=%d: %v", record.Topic, record.Partition, record.Offset, err)
+					continue
+				}
+				if outcome.DeadLettered {
+					log.Printf("order.created moved to DLT partition=%d offset=%d attempts=%d", record.Partition, record.Offset, outcome.Attempts)
+				}
+				commitCtx, commitCancel := context.WithTimeout(context.Background(), 3*time.Second)
+				err = mq.CommitProcessed(commitCtx, consumer, record)
+				commitCancel()
+				if err != nil {
+					log.Printf("commit order.created partition=%d offset=%d: %v", record.Partition, record.Offset, err)
+				}
+			}
+		}
+	}()
 
 	productRepo := cache.NewCountingRepo(cache.NewSQLProductRepo(db))
 	productCache := cache.New(rdb, productRepo, cache.DefaultOptions())
@@ -329,6 +387,53 @@ func main() {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		default:
 			metrics.DeductOutcomes.WithLabelValues(approach, "error").Inc()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+	})
+
+	// m04 异步接单：Redis 预扣 + Kafka broker ack 后立刻 202，DB 落单由上面的 consumer 完成。
+	r.POST("/debug/orders/async", func(c *gin.Context) {
+		var body deductOrderBody
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		requestID := body.RequestID
+		if requestID == "" {
+			id, err := node.NextID()
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			requestID = strconv.FormatInt(id, 10)
+		}
+		quantity := body.Quantity
+		if quantity == 0 {
+			quantity = 1
+		}
+		produceCtx, produceCancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+		defer produceCancel()
+		accepted, err := mq.EnqueueOrder(produceCtx, rdb, producer, orderTopic, order.PlaceOrderRequest{RequestID: requestID, ProductID: body.ProductID, UserID: body.UserID, Quantity: quantity})
+		switch {
+		case err == nil:
+			c.JSON(http.StatusAccepted, gin.H{"request_id": accepted.RequestID, "status": "accepted"})
+		case errors.Is(err, order.ErrInsufficientStock):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+		}
+	})
+
+	// 202 之后的薄查询端点：没有完整订单状态机，DB 尚不可见时只返回 pending。
+	r.GET("/orders/requests/:requestID", func(c *gin.Context) {
+		var found order.Order
+		err := db.GetContext(c.Request.Context(), &found, "SELECT id, product_id, user_id, request_id, quantity, status, created_at FROM orders WHERE request_id = ?", c.Param("requestID"))
+		switch {
+		case err == nil:
+			c.JSON(http.StatusOK, found)
+		case errors.Is(err, sql.ErrNoRows):
+			c.JSON(http.StatusAccepted, gin.H{"request_id": c.Param("requestID"), "status": "pending"})
+		default:
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		}
 	})

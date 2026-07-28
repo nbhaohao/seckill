@@ -1,0 +1,21 @@
+package mq
+
+import (
+	"context"
+
+	"github.com/twmb/franz-go/pkg/kgo"
+)
+
+// NewManualCommitConsumer is m04 p2 S1. AI will implement it during p2.
+//  1. DisableAutoCommit makes the offset boundary visible: processing success
+//     comes first, then CommitRecords. A crash between them intentionally replays.
+func NewManualCommitConsumer(group, topic string, brokers ...string) (*kgo.Client, error) {
+	panic("TODO: phase p2") // AI 将在 p2 S1 按上面的 why 边界实现。
+}
+
+// CommitProcessed is m04 p2 S2. AI will implement it during p2.
+//  1. Only a successfully handled record may cross this line. Committing first
+//     converts a crash into silent order loss rather than safe duplicate work.
+func CommitProcessed(ctx context.Context, consumer *kgo.Client, record *kgo.Record) error {
+	panic("TODO: phase p2") // AI 将在 p2 S2 按上面的 why 边界实现。
+}

@@ -1,5 +1,4 @@
-# m01 只需要 mysql；m02（缓存层）起 mysql + redis；kafka 仍挂在 profiles: ["future"] 下——
-# `docker compose up -d` 默认不会启动它，m04 削峰再摘掉那行 profiles。
+# m01 只需要 mysql；m02/m03 起 mysql + redis；m04 起完整的 mysql + redis + kafka。
 # 版本锁定（COURSE_SPEC 开工前 checklist 核过官方最新稳定 tag）：
 #   MySQL 8.4.10 · Redis 7.4.9 · Kafka 4.3.1（KRaft 单节点，无需 ZooKeeper）。
 services:
@@ -45,8 +44,14 @@ services:
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      # 单 broker 必须把 Kafka 内部 topic 的副本数从默认 3 降到 1，
+      # 否则 consumer group 提交 offset / 事务状态 topic 会因副本不足失败。
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # 本地集成测试不需要为首次 group rebalance 空等默认延迟。
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       CLUSTER_ID: seckill-dev-cluster
-    profiles: ["future"] # m04 削峰再启用
 
 volumes:
   mysql-data:
