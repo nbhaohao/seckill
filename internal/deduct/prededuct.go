@@ -46,8 +46,7 @@ return redis.call('DECRBY', KEYS[1], qty)
 // 它只在"预扣成功了但后面落库失败"这条路径上被调用——没有它，那部分库存就凭空蒸发，
 // Redis 说卖光了、DB 里却没有对应的订单，恒等式当场破掉。
 var rollbackScript = redis.NewScript(`
--- TODO: phase p4 — AI 将在 p4 学习时实现预扣回滚
-return redis.error_reply("TODO: phase p4 rollbackScript not implemented")
+return redis.call('INCRBY', KEYS[1], ARGV[1])
 `)
 
 // PreDeduct 是 p4 S1：跑一次 preDeductScript。
@@ -67,7 +66,7 @@ func PreDeduct(ctx context.Context, rdb *redis.Client, productID int64, qty int)
 
 // RollbackPreDeduct 是 p4 S2 的补偿动作：跑 rollbackScript 把量还回去。
 func RollbackPreDeduct(ctx context.Context, rdb *redis.Client, productID int64, qty int) error {
-	panic("TODO: phase p4 — AI 将在 p4 学习时分切片实现预扣回滚")
+	return rollbackScript.Run(ctx, rdb, []string{StockKey(productID)}, qty).Err()
 }
 
 // PlaceOrderWithPreDeduct 是 p4 S2：预扣成功 → 同步落库 → 落库失败就把预扣还回去。
@@ -82,5 +81,37 @@ func RollbackPreDeduct(ctx context.Context, rdb *redis.Client, productID int64, 
 // 落库这一步在本模块是同步的。m04 会把它换成"发条消息进 Kafka、异步消费落库"，
 // 那是削峰的事，本关不碰。
 func PlaceOrderWithPreDeduct(ctx context.Context, rdb *redis.Client, db *sqlx.DB, node *idgen.Node, req order.PlaceOrderRequest) (*order.Order, error) {
-	panic("TODO: phase p4 — AI 将在 p4 学习时分切片实现预扣后同步落库")
+	if err := validateRequest(req); err != nil {
+		return nil, err
+	}
+
+	if _, err := PreDeduct(ctx, rdb, req.ProductID, req.Quantity); err != nil {
+		return nil, err
+	}
+
+	tx, err := db.BeginTxx(ctx, nil)
+	if err != nil {
+		_ = RollbackPreDeduct(ctx, rdb, req.ProductID, req.Quantity)
+		return nil, err
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE products SET stock = stock - ? WHERE id = ?",
+		req.Quantity, req.ProductID); err != nil {
+		_ = tx.Rollback()
+		_ = RollbackPreDeduct(ctx, rdb, req.ProductID, req.Quantity)
+		return nil, err
+	}
+
+	o, err := insertOrderTx(ctx, tx, node, req)
+	if err != nil {
+		_ = tx.Rollback()
+		_ = RollbackPreDeduct(ctx, rdb, req.ProductID, req.Quantity)
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		_ = RollbackPreDeduct(ctx, rdb, req.ProductID, req.Quantity)
+		return nil, err
+	}
+	return o, nil
 }
