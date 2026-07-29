@@ -10,7 +10,13 @@ import (
 //  1. DisableAutoCommit makes the offset boundary visible: processing success
 //     comes first, then CommitRecords. A crash between them intentionally replays.
 func NewManualCommitConsumer(group, topic string, brokers ...string) (*kgo.Client, error) {
-	panic("TODO: phase p2") // AI 将在 p2 S1 按上面的 why 边界实现。
+	return kgo.NewClient(
+		kgo.SeedBrokers(brokers...),
+		kgo.ConsumerGroup(group),
+		kgo.ConsumeTopics(topic),
+		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
+		kgo.DisableAutoCommit(),
+	)
 }
 
 // CommitProcessed is m04 p2 S2. AI will implement it during p2.
