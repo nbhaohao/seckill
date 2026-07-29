@@ -23,5 +23,5 @@ func NewManualCommitConsumer(group, topic string, brokers ...string) (*kgo.Clien
 //  1. Only a successfully handled record may cross this line. Committing first
 //     converts a crash into silent order loss rather than safe duplicate work.
 func CommitProcessed(ctx context.Context, consumer *kgo.Client, record *kgo.Record) error {
-	panic("TODO: phase p2") // AI 将在 p2 S2 按上面的 why 边界实现。
+	return consumer.CommitRecords(ctx, record)
 }
