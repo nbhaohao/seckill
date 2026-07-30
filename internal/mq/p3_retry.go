@@ -2,11 +2,39 @@ package mq
 
 import (
 	"context"
+	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/nbhaohao/go-seckill/internal/order"
 )
+
+// retryWithBackoff is m04 p3 S1. It bounds attempts to policy.MaxAttempts and
+// waits an exponentially growing, cancellable interval between them; the last
+// failed attempt never waits since there is no next attempt to reach.
+func retryWithBackoff(ctx context.Context, record *kgo.Record, policy RetryPolicy, handler RecordHandler) (*order.Order, RetryResult, error) {
+	var result RetryResult
+	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
+		result.Attempts = attempt
+		placed, err := handler(ctx, record)
+		if err == nil {
+			return placed, result, nil
+		}
+		if attempt == policy.MaxAttempts {
+			return nil, result, err
+		}
+		backoff := policy.BaseBackoff << (attempt - 1)
+		result.Backoffs = append(result.Backoffs, backoff)
+		timer := time.NewTimer(backoff)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, result, ctx.Err()
+		}
+	}
+	panic("unreachable: loop above always returns")
+}
 
 // ProcessWithRetry is m04 p3. AI will implement it in two slices during p3.
 //  1. Retry is bounded and exponential: permanent poison must not occupy one
