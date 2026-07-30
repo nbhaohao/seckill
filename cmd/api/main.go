@@ -8,8 +8,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -24,6 +26,7 @@ import (
 	"github.com/nbhaohao/go-seckill/internal/metrics"
 	"github.com/nbhaohao/go-seckill/internal/mq"
 	"github.com/nbhaohao/go-seckill/internal/order"
+	"github.com/nbhaohao/go-seckill/internal/overload"
 	"github.com/nbhaohao/go-seckill/internal/redisconn"
 	"github.com/nbhaohao/go-seckill/internal/server"
 )
@@ -39,6 +42,17 @@ func envIntOr(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
+		}
+	}
+	return def
+}
+
+// envFloatOr 只服务 m05 的 token bucket 补充速率——它是浮点数，envIntOr 解析不了，
+// 单独加一个小helper 比让 envIntOr 承担双重职责更清楚。
+func envFloatOr(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
 		}
 	}
 	return def
@@ -95,7 +109,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("connect redis: %v（先 docker compose up -d redis）", err)
 	}
-	defer func() { _ = rdb.Close() }()
+	// rdb/producer/consumer/db 的关闭全部挪进 m05 p4 的 overload.Shutdown 的
+	// close-deps 步骤——不再各自 defer，避免 shutdown 顺序完成后再被 defer 重复关一次。
 
 	// m04 Kafka 胶水（已就位，AI 生成）：核心机制都留在 internal/mq 的 phase TODO。
 	// API 只负责把最终形态接起来：202 接单、manual commit、有限重试与 lag gauge。
@@ -107,23 +122,36 @@ func main() {
 	if err != nil {
 		log.Fatalf("new Kafka producer: %v", err)
 	}
-	defer producer.Close()
 	consumer, err := mq.NewManualCommitConsumer(consumerGroup, orderTopic, brokers...)
 	if err != nil {
 		log.Fatalf("new Kafka consumer: %v", err)
 	}
-	defer consumer.Close()
 	if err := mq.RegisterLagGauge(prometheus.DefaultRegisterer, producer, consumerGroup); err != nil {
 		log.Fatalf("register Kafka lag gauge: %v", err)
 	}
+
+	// consumerLoopCtx 是 m05 p4「stop-consumer」步骤的钩子：shutdown 时取消它，
+	// 循环在处理完手头这一批 record（含 commit）之后、下一次 poll 之前退出，
+	// consumerLoopDone 让 shutdown 步骤知道循环真的已经停了，而不是靠 Sleep 猜。
+	consumerLoopCtx, stopConsumerLoop := context.WithCancel(context.Background())
+	consumerLoopDone := make(chan struct{})
 	go func() {
+		defer close(consumerLoopDone)
 		for {
-			pollCtx, pollCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			select {
+			case <-consumerLoopCtx.Done():
+				return
+			default:
+			}
+			pollCtx, pollCancel := context.WithTimeout(consumerLoopCtx, 5*time.Second)
 			records, err := mq.PollBatch(pollCtx, consumer)
 			pollCancel()
 			if err != nil {
 				if errors.Is(err, context.DeadlineExceeded) {
 					continue
+				}
+				if errors.Is(err, context.Canceled) {
+					continue // 顶部的 select 会在下一圈捕到 consumerLoopCtx.Done() 并返回。
 				}
 				log.Printf("poll order.created: %v", err)
 				continue
@@ -155,6 +183,72 @@ func main() {
 	productCache := cache.New(rdb, productRepo, cache.DefaultOptions())
 	if err := metrics.RegisterCacheDBLoads(prometheus.DefaultRegisterer, productRepo.Loads); err != nil {
 		log.Fatalf("register cache metrics: %v", err)
+	}
+
+	// ===== m05 过载治理层（p1 有界并发槽 + p2 令牌桶 + p3 熔断）=====
+	// admission 与 bucket 是两道独立的门（COURSE_SPEC 拍板）：bucket 管"允许多快进"，
+	// admission 管"系统同时敢答应做多少活"；两者都必须在 Redis 预扣/DB 写/Kafka produce
+	// 之类的业务副作用之前判定，否则快速失败就救不回已经发生的副作用。
+	admission := overload.NewAdmission(
+		envIntOr("ADMISSION_CAPACITY", 64),
+		time.Duration(envIntOr("ADMISSION_WAIT_BUDGET_MS", 50))*time.Millisecond,
+	)
+	bucket := overload.NewTokenBucket(
+		envIntOr("RATE_LIMIT_CAPACITY", 200),
+		envFloatOr("RATE_LIMIT_REFILL_PER_SECOND", 200),
+		nil, // nil 时 TokenBucket 内部退回 time.Now，生产环境不用操心传时钟。
+	)
+	breaker := overload.NewBreaker(overload.BreakerPolicy{
+		FailureThreshold: envIntOr("BREAKER_FAILURE_THRESHOLD", 5),
+		OpenFor:          time.Duration(envIntOr("BREAKER_OPEN_FOR_MS", 2000)) * time.Millisecond,
+		HalfOpenProbes:   envIntOr("BREAKER_HALFOPEN_PROBES", 1),
+	})
+
+	admissionOutcomes := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "seckill_admission_outcomes_total",
+		Help: "m05 p1 有界并发槽的结果计数（outcome=accepted|rejected）。",
+	}, []string{"outcome"})
+	rateLimitOutcomes := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "seckill_ratelimit_outcomes_total",
+		Help: "m05 p2 令牌桶限流的结果计数（outcome=accepted|rejected）。",
+	}, []string{"outcome"})
+	breakerStateGauge := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "seckill_breaker_state",
+		Help: "m05 p3 熔断器当前状态（0=closed 1=open 2=half-open）。",
+	}, func() float64 { return float64(breaker.State()) })
+	admissionInflightGauge := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "seckill_admission_inflight",
+		Help: "m05 p1 有界并发槽当前占用数（drain-inflight 关闭步骤等它归零）。",
+	}, func() float64 { return float64(admission.Stats().InFlight) })
+	for _, c := range []prometheus.Collector{admissionOutcomes, rateLimitOutcomes, breakerStateGauge, admissionInflightGauge} {
+		if err := prometheus.DefaultRegisterer.Register(c); err != nil {
+			log.Fatalf("register m05 overload metrics: %v", err)
+		}
+	}
+
+	// overloadGate 只挂在写路径（/orders、/debug/orders/*）：先令牌桶限流，
+	// 再有界并发槽，最后才进业务 handler；/healthz、/metrics、只读的 /products/:id
+	// 不挂这两道门。Acquire 成功后立刻 defer Release，保证 handler 无论怎么退出
+	// （成功/业务错误/ctx 取消）都会还槽，不会让 InFlight 只涨不跌。
+	overloadGate := func(c *gin.Context) {
+		if !bucket.Allow() {
+			rateLimitOutcomes.WithLabelValues("rejected").Inc()
+			status, payload := overload.WritePathFailure(overload.ErrRateLimited)
+			c.Header("Retry-After", strconv.Itoa(payload.RetryAfter))
+			c.AbortWithStatusJSON(status, payload)
+			return
+		}
+		rateLimitOutcomes.WithLabelValues("accepted").Inc()
+
+		if err := admission.Acquire(c.Request.Context()); err != nil {
+			admissionOutcomes.WithLabelValues("rejected").Inc()
+			status, payload := overload.WritePathFailure(err)
+			c.AbortWithStatusJSON(status, payload)
+			return
+		}
+		admissionOutcomes.WithLabelValues("accepted").Inc()
+		defer admission.Release()
+		c.Next()
 	}
 
 	r := gin.New()
@@ -272,7 +366,7 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"slept": seconds})
 	})
 
-	r.POST("/orders", func(c *gin.Context) {
+	r.POST("/orders", overloadGate, func(c *gin.Context) {
 		var body placeOrderBody
 		if err := c.ShouldBindJSON(&body); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -321,7 +415,7 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"warmed": id})
 	})
 
-	r.POST("/debug/orders/:approach", func(c *gin.Context) {
+	r.POST("/debug/orders/:approach", overloadGate, func(c *gin.Context) {
 		var body deductOrderBody
 		if err := c.ShouldBindJSON(&body); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -392,7 +486,11 @@ func main() {
 	})
 
 	// m04 异步接单：Redis 预扣 + Kafka broker ack 后立刻 202，DB 落单由上面的 consumer 完成。
-	r.POST("/debug/orders/async", func(c *gin.Context) {
+	// m05 p3：EnqueueOrder 套 breaker.Do——它包的是"Kafka 这个远程依赖调用"，
+	// 不包业务结果，所以 ErrInsufficientStock 在 fn 内部被拦下来单独记，不喂给
+	// breaker 的失败计数（拍板：卖光了不是依赖故障）。Breaker Open 时必须走
+	// WritePathFailure 返回失败状态码，绝不能把"没敢发 Kafka"伪造成 202。
+	r.POST("/debug/orders/async", overloadGate, func(c *gin.Context) {
 		var body deductOrderBody
 		if err := c.ShouldBindJSON(&body); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -413,14 +511,30 @@ func main() {
 		}
 		produceCtx, produceCancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
 		defer produceCancel()
-		accepted, err := mq.EnqueueOrder(produceCtx, rdb, producer, orderTopic, order.PlaceOrderRequest{RequestID: requestID, ProductID: body.ProductID, UserID: body.UserID, Quantity: quantity})
+
+		var accepted *mq.AcceptedOrder
+		var bizErr error
+		breakerErr := breaker.Do(produceCtx, func(ctx context.Context) error {
+			a, err := mq.EnqueueOrder(ctx, rdb, producer, orderTopic, order.PlaceOrderRequest{RequestID: requestID, ProductID: body.ProductID, UserID: body.UserID, Quantity: quantity})
+			if errors.Is(err, order.ErrInsufficientStock) {
+				bizErr = err
+				return nil // 业务结果，不算 Kafka 调用失败，不喂给熔断器计数。
+			}
+			accepted = a
+			return err
+		})
+
 		switch {
-		case err == nil:
-			c.JSON(http.StatusAccepted, gin.H{"request_id": accepted.RequestID, "status": "accepted"})
-		case errors.Is(err, order.ErrInsufficientStock):
-			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		case errors.Is(breakerErr, overload.ErrBreakerOpen):
+			status, payload := overload.WritePathFailure(overload.ErrBreakerOpen)
+			c.JSON(status, payload)
+		case bizErr != nil:
+			c.JSON(http.StatusConflict, gin.H{"error": bizErr.Error()})
+		case breakerErr != nil:
+			status, payload := overload.WritePathFailure(breakerErr)
+			c.JSON(status, payload)
 		default:
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+			c.JSON(http.StatusAccepted, gin.H{"request_id": accepted.RequestID, "status": "accepted"})
 		}
 	})
 
@@ -441,8 +555,88 @@ func main() {
 	cfg := server.DefaultServerConfig()
 	srv := server.NewProductionServer(envOr("HTTP_ADDR", ":8080"), r, db.DB, cfg)
 
-	log.Printf("go-seckill listening on %s", srv.Addr)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatalf("listen: %v", err)
+	go func() {
+		log.Printf("go-seckill listening on %s", srv.Addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("listen: %v", err)
+		}
+	}()
+
+	// ===== m05 p4：SIGTERM/SIGINT 触发优雅关闭 =====
+	// signal.NotifyContext 拿到信号就取消 ctx，主 goroutine 从这里往下走，
+	// 与处理请求的 goroutine 完全分开——这样 ListenAndServe 的阻塞不会挡住关闭流程。
+	sigCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	<-sigCtx.Done()
+	stopSignals()
+	log.Printf("shutdown signal received, starting graceful shutdown")
+
+	shutdownTimeout := time.Duration(envIntOr("SHUTDOWN_TIMEOUT_MS", 15000)) * time.Millisecond
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer shutdownCancel()
+
+	// loggedStep 把每一步的开始/结束打成日志——这是 scripts/checks_m05.sh 用来
+	// 断言"五步顺序、一步不落"的唯一证据来源，比读 ShutdownReport 更早、更细。
+	loggedStep := func(name string, fn func(context.Context) error) overload.ShutdownStep {
+		return overload.ShutdownStep{
+			Name: name,
+			Fn: func(ctx context.Context) error {
+				log.Printf("shutdown step start: %s", name)
+				err := fn(ctx)
+				log.Printf("shutdown step done: %s err=%v", name, err)
+				return err
+			},
+		}
 	}
+
+	report := overload.Shutdown(shutdownCtx, []overload.ShutdownStep{
+		// 1. stop-http：不再接新请求，等在途 HTTP 请求处理完（或超时）。
+		loggedStep("stop-http", func(ctx context.Context) error {
+			return srv.Shutdown(ctx)
+		}),
+		// 2. drain-inflight：等 p1 有界并发槽的 InFlight 归零，受同一个 deadline 约束。
+		loggedStep("drain-inflight", func(ctx context.Context) error {
+			for {
+				if admission.Stats().InFlight == 0 {
+					return nil
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(50 * time.Millisecond):
+				}
+			}
+		}),
+		// 3. stop-consumer：取消 consumer 循环的 ctx，等它处理完手头这一批
+		//    （含 commit）后自己退出，不再拉新消息。
+		loggedStep("stop-consumer", func(ctx context.Context) error {
+			stopConsumerLoop()
+			select {
+			case <-consumerLoopDone:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}),
+		// 4. flush-producer：把 producer 缓冲里还没发出去的记录发完。
+		loggedStep("flush-producer", func(ctx context.Context) error {
+			return producer.Flush(ctx)
+		}),
+		// 5. close-deps：consumer/producer/Redis/DB 全部关闭，err 用 errors.Join
+		//    汇总而不是只报第一个，方便一次看全。
+		loggedStep("close-deps", func(ctx context.Context) error {
+			consumer.Close()
+			producer.Close()
+			var errs []error
+			if err := rdb.Close(); err != nil {
+				errs = append(errs, err)
+			}
+			if err := db.Close(); err != nil {
+				errs = append(errs, err)
+			}
+			return errors.Join(errs...)
+		}),
+	})
+
+	log.Printf("graceful-shutdown transcript: completed=%v failed=%q err=%v elapsed=%s",
+		report.Completed, report.Failed, report.Err, report.Elapsed)
 }
