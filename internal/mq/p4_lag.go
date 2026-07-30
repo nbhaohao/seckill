@@ -2,8 +2,10 @@ package mq
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -11,7 +13,18 @@ import (
 //  1. kadm computes lag from committed group offsets and log-end offsets;
 //     GroupLag.Total is the sum across this group's topic partitions.
 func GroupLagTotal(ctx context.Context, client *kgo.Client, group string) (int64, error) {
-	panic("TODO: phase p4") // AI 将在 p4 S1 按上面的 why 边界实现。
+	lags, err := kadm.NewClient(client).Lag(ctx, group)
+	if err != nil {
+		return 0, err
+	}
+	described, ok := lags[group]
+	if !ok {
+		return 0, fmt.Errorf("group %s not found in lag response", group)
+	}
+	if err := described.Error(); err != nil {
+		return 0, err
+	}
+	return described.Lag.Total(), nil
 }
 
 // RegisterLagGauge is m04 p4 S2. AI will implement it during p4.
