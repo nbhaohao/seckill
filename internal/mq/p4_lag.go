@@ -3,11 +3,16 @@ package mq
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
+
+// lagScrapeTimeout bounds each /metrics read of GroupLagTotal so an
+// unreachable broker cannot leave the handler blocked forever.
+const lagScrapeTimeout = 2 * time.Second
 
 // GroupLagTotal is m04 p4 S1. AI will implement it during p4.
 //  1. kadm computes lag from committed group offsets and log-end offsets;
@@ -33,5 +38,16 @@ func GroupLagTotal(ctx context.Context, client *kgo.Client, group string) (int64
 //  2. Each scrape gets its own short deadline; an unavailable broker must not
 //     leave the /metrics handler blocked forever.
 func RegisterLagGauge(reg prometheus.Registerer, client *kgo.Client, group string) error {
-	panic("TODO: phase p4") // AI 将在 p4 S2 按上面的 why 边界实现。
+	return reg.Register(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "seckill_kafka_consumer_group_lag",
+		Help: "Kafka consumer group 已提交 offset 与 log end 的差距总和，-1 表示查询失败。",
+	}, func() float64 {
+		ctx, cancel := context.WithTimeout(context.Background(), lagScrapeTimeout)
+		defer cancel()
+		lag, err := GroupLagTotal(ctx, client, group)
+		if err != nil {
+			return -1
+		}
+		return float64(lag)
+	}))
 }
