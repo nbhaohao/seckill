@@ -28,12 +28,30 @@ type Admission struct {
 
 // NewAdmission is m05 p1 S1. AI will implement it during p1.
 func NewAdmission(capacity int, waitBudget time.Duration) *Admission {
-	panic("TODO: phase p1") // AI 将在 p1 S1 按上面的 why 边界实现。
+	return &Admission{
+		slots:      make(chan struct{}, capacity),
+		waitBudget: waitBudget,
+		capacity:   capacity,
+	}
 }
 
 // Acquire is m05 p1 S1. AI will implement it during p1.
 func (a *Admission) Acquire(ctx context.Context) error {
-	panic("TODO: phase p1") // AI 将在 p1 S1 按上面的 why 边界实现。
+	select {
+	case a.slots <- struct{}{}:
+		a.mu.Lock()
+		a.inFlight++
+		a.accepted++
+		a.mu.Unlock()
+		return nil
+	case <-time.After(a.waitBudget):
+		a.mu.Lock()
+		a.rejected++
+		a.mu.Unlock()
+		return ErrAdmissionFull
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Release is m05 p1 S2. AI will implement it during p1.
