@@ -52,17 +52,37 @@ func (b *Breaker) Do(ctx context.Context, fn func(context.Context) error) error 
 	now := b.now()
 	b.checkTransitionLocked(now)
 
-	if b.state == StateOpen {
+	switch b.state {
+	case StateOpen:
 		b.mu.Unlock()
 		return ErrBreakerOpen
+	case StateHalfOpen:
+		if b.probesInFlight >= b.policy.HalfOpenProbes {
+			b.mu.Unlock()
+			return ErrBreakerOpen
+		}
+		b.probesInFlight++
 	}
-	// StateClosed falls through here; the half-open branch is added in S2.
+	probing := b.state == StateHalfOpen
 	b.mu.Unlock()
 
 	err := fn(ctx)
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	if probing {
+		b.probesInFlight--
+		if err == nil {
+			b.state = StateClosed
+			b.failures = 0
+		} else {
+			b.state = StateOpen
+			b.openedAt = b.now()
+		}
+		return err
+	}
+
 	if err == nil {
 		b.failures = 0
 		return nil
