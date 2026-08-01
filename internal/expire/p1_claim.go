@@ -10,8 +10,10 @@ import (
 // IndexOrder is sk-m5a p1 S1. AI 将在 p1 学习时分切片实现。
 //  1. 到期时刻写进 score，orderID 写进 member；索引只表达何时可领取。
 func IndexOrder(ctx context.Context, rdb *redis.Client, orderID string, expiresAt time.Time) error {
-	// TODO(sk-m5a-p1-s1): write the order into ExpireZSetKey.
-	panic("TODO: phase p1 index order expiry")
+	return rdb.ZAdd(ctx, ExpireZSetKey, redis.Z{
+		Score:  float64(expiresAt.UnixMilli()),
+		Member: orderID,
+	}).Err()
 }
 
 // ClaimDue is sk-m5a p1 S2. AI 将在 p1 学习时分切片实现。
