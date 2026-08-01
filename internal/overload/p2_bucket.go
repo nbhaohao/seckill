@@ -40,10 +40,31 @@ func NewTokenBucket(capacity int, refillPerSecond float64, now func() time.Time)
 
 // Allow is m05 p2 S2. AI will implement it during p2.
 func (b *TokenBucket) Allow() bool {
-	panic("TODO: phase p2") // AI 将在 p2 S2 按上面的 why 边界实现。
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	now := b.now()
+	b.tokens += now.Sub(b.last).Seconds() * b.refillPerSecond
+	if b.tokens > b.capacity {
+		b.tokens = b.capacity
+	}
+	b.last = now
+
+	if b.tokens >= 1 {
+		b.tokens--
+		return true
+	}
+	return false
 }
 
 // Tokens is m05 p2 S2. AI will implement it during p2.
 func (b *TokenBucket) Tokens() float64 {
-	panic("TODO: phase p2") // AI 将在 p2 S2 按上面的 why 边界实现。
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	tokens := b.tokens + b.now().Sub(b.last).Seconds()*b.refillPerSecond
+	if tokens > b.capacity {
+		tokens = b.capacity
+	}
+	return tokens
 }
