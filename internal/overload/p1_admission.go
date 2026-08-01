@@ -56,10 +56,21 @@ func (a *Admission) Acquire(ctx context.Context) error {
 
 // Release is m05 p1 S2. AI will implement it during p1.
 func (a *Admission) Release() {
-	panic("TODO: phase p1") // AI 将在 p1 S2 按上面的 why 边界实现。
+	<-a.slots
+	a.mu.Lock()
+	a.inFlight--
+	a.mu.Unlock()
 }
 
 // Stats is m05 p1 S2. AI will implement it during p1.
 func (a *Admission) Stats() AdmissionStats {
-	panic("TODO: phase p1") // AI 将在 p1 S2 按上面的 why 边界实现。
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return AdmissionStats{
+		Capacity:  a.capacity,
+		InFlight:  a.inFlight,
+		Accepted:  a.accepted,
+		Rejected:  a.rejected,
+		WaitTotal: a.waitTotal,
+	}
 }
