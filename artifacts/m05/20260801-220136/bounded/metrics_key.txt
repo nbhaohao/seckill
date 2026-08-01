@@ -1,0 +1,6 @@
+go_sql_wait_count_total{db_name="seckill"} 0
+go_sql_wait_duration_seconds_total{db_name="seckill"} 0
+seckill_admission_inflight 0
+seckill_admission_outcomes_total{outcome="accepted"} 7500
+seckill_breaker_state 0
+seckill_ratelimit_outcomes_total{outcome="accepted"} 7500

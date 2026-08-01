@@ -1,0 +1,30 @@
+[GIN-debug] [WARNING] Running in "debug" mode. Switch to "release" mode in production.
+ - using env:	export GIN_MODE=release
+ - using code:	gin.SetMode(gin.ReleaseMode)
+
+[GIN-debug] GET    /healthz                  --> main.main.func5 (2 handlers)
+[GIN-debug] GET    /metrics                  --> main.main.WrapH.func24 (2 handlers)
+[GIN-debug] GET    /debug/products/:id       --> main.main.func6 (2 handlers)
+[GIN-debug] GET    /products/:id             --> main.main.func7 (2 handlers)
+[GIN-debug] GET    /debug/products/:id/nocache --> main.main.func8 (2 handlers)
+[GIN-debug] POST   /debug/cache/warm/:id     --> main.main.func9 (2 handlers)
+[GIN-debug] POST   /debug/products/:id/stock --> main.main.func10 (2 handlers)
+[GIN-debug] GET    /debug/slow               --> main.main.func11 (2 handlers)
+[GIN-debug] POST   /orders                   --> main.main.func12 (3 handlers)
+[GIN-debug] POST   /debug/deduct/warm/:id    --> main.main.func13 (2 handlers)
+[GIN-debug] POST   /debug/orders/:approach   --> main.main.func14 (3 handlers)
+[GIN-debug] POST   /debug/orders/async       --> main.main.func15 (3 handlers)
+[GIN-debug] GET    /orders/requests/:requestID --> main.main.func16 (2 handlers)
+2026/08/01 22:02:25 go-seckill listening on :8082
+2026/08/01 22:02:54 shutdown signal received, starting graceful shutdown
+2026/08/01 22:02:54 shutdown step start: stop-http
+2026/08/01 22:02:54 shutdown step done: stop-http err=<nil>
+2026/08/01 22:02:54 shutdown step start: drain-inflight
+2026/08/01 22:02:54 shutdown step done: drain-inflight err=<nil>
+2026/08/01 22:02:54 shutdown step start: stop-consumer
+2026/08/01 22:02:54 shutdown step done: stop-consumer err=<nil>
+2026/08/01 22:02:54 shutdown step start: flush-producer
+2026/08/01 22:02:54 shutdown step done: flush-producer err=<nil>
+2026/08/01 22:02:54 shutdown step start: close-deps
+2026/08/01 22:02:54 shutdown step done: close-deps err=<nil>
+2026/08/01 22:02:54 graceful-shutdown transcript: completed=[stop-http drain-inflight stop-consumer flush-producer close-deps] failed="" err=<nil> elapsed=4.686208ms

@@ -1,0 +1,37 @@
+-- 攻击中：每秒采样 DB 累计订单 / Kafka lag --
+t=0s db_orders=0 lag=0
+t=1s db_orders=0 lag=0
+t=2s db_orders=0 lag=0
+t=4s db_orders=0 lag=0
+t=5s db_orders=0 lag=0
+t=6s db_orders=0 lag=0
+t=7s db_orders=0 lag=0
+t=8s db_orders=0 lag=0
+t=10s db_orders=0 lag=0
+t=11s db_orders=0 lag=0
+t=12s db_orders=211 lag=214
+t=13s db_orders=529 lag=458
+t=14s db_orders=842 lag=708
+t=15s db_orders=1149 lag=960
+t=16s db_orders=1466 lag=1209
+t=18s db_orders=1786 lag=1449
+t=19s db_orders=2076 lag=1717
+t=20s db_orders=2381 lag=1973
+t=21s db_orders=2702 lag=2214
+t=22s db_orders=3008 lag=2474
+t=23s db_orders=3304 lag=2734
+t=24s db_orders=3626 lag=2970
+t=25s db_orders=3927 lag=3230
+-- 攻击结束，等 backlog 排空（lag=0），超时 60s --
+drain t=29s db_orders=4825 lag=2670
+drain t=30s db_orders=5143 lag=2354
+drain t=31s db_orders=5467 lag=2029
+drain t=32s db_orders=5814 lag=1682
+drain t=33s db_orders=6100 lag=1399
+drain t=35s db_orders=6202 lag=1297
+drain t=36s db_orders=6291 lag=1206
+drain t=37s db_orders=6627 lag=869
+drain t=38s db_orders=6932 lag=564
+drain t=39s db_orders=7261 lag=236
+drain t=40s db_orders=7500 lag=0
+lag 峰值=3230 排空秒数=40 已排空=true

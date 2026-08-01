@@ -1,3 +1,6 @@
 .env
 *.test
 /bin/
+
+# 压测原始二进制结果（报告 json/txt 已入库，bin 不入库）
+artifacts/**/vegeta.bin

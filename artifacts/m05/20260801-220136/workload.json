@@ -1,0 +1,16 @@
+{
+  "seed": "m05-overload-comparison-20260801-220136",
+  "endpoint": "POST /debug/orders/async",
+  "request_body": "{\"product_id\":10590,\"user_id\":1,\"quantity\":1}",
+  "request_body_sha256": "d110a7189005da3fef365bd7e3b3b235fe1f2c983fbdd06bf730453cfcf37a4b",
+  "rate_per_second": 500,
+  "duration": "15s",
+  "product_id": 10590,
+  "initial_stock": 1000000,
+  "unbounded_admission_capacity": 100000,
+  "bounded_admission_capacity": 20,
+  "rate_limiter": "capacity/refill 拉到 1000000，本轮对比只让 admission 容量当变量",
+  "go_version": "go version go1.26.5 darwin/arm64",
+  "uname": "Darwin PudgeZhang.local 25.5.0 Darwin Kernel Version 25.5.0: Tue Jun  9 22:28:29 PDT 2026; root:xnu-12377.121.10~1/RELEASE_ARM64_T6030 arm64",
+  "git_commit": "9cd5c1be9c990d242c535b9e00a7548bd7ff027b"
+}
