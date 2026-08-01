@@ -2,6 +2,8 @@ package overload
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"sync"
 	"time"
 )
@@ -114,10 +116,21 @@ func (b *Breaker) State() BreakerState {
 
 // WritePathFailure is m05 p3 S3. AI will implement it during p3.
 func WritePathFailure(err error) (int, DegradedPayload) {
-	panic("TODO: phase p3") // AI 将在 p3 S3 按上面的 why 边界实现。
+	status := http.StatusServiceUnavailable
+	if errors.Is(err, ErrRateLimited) {
+		status = http.StatusTooManyRequests
+	}
+	return status, DegradedPayload{
+		Error:      err.Error(),
+		Degraded:   false,
+		RetryAfter: writeRetryAfterSeconds,
+	}
 }
 
 // ReadPathFallback is m05 p3 S3. AI will implement it during p3.
 func ReadPathFallback(err error, staleAvailable bool) (int, DegradedPayload) {
-	panic("TODO: phase p3") // AI 将在 p3 S3 按上面的 why 边界实现。
+	if !staleAvailable {
+		return WritePathFailure(err)
+	}
+	return http.StatusOK, DegradedPayload{Degraded: true}
 }
