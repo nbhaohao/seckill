@@ -39,17 +39,57 @@ type Breaker struct {
 
 // NewBreaker is m05 p3 S1. AI will implement it during p3.
 func NewBreaker(policy BreakerPolicy) *Breaker {
-	panic("TODO: phase p3") // AI 将在 p3 S1 按上面的 why 边界实现。
+	now := policy.Now
+	if now == nil {
+		now = time.Now
+	}
+	return &Breaker{policy: policy, now: now}
 }
 
 // Do is m05 p3 S1+S2. AI will implement it during p3.
 func (b *Breaker) Do(ctx context.Context, fn func(context.Context) error) error {
-	panic("TODO: phase p3") // AI 将在 p3 S1+S2 按上面的 why 边界实现。
+	b.mu.Lock()
+	now := b.now()
+	b.checkTransitionLocked(now)
+
+	if b.state == StateOpen {
+		b.mu.Unlock()
+		return ErrBreakerOpen
+	}
+	// StateClosed falls through here; the half-open branch is added in S2.
+	b.mu.Unlock()
+
+	err := fn(ctx)
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err == nil {
+		b.failures = 0
+		return nil
+	}
+	b.failures++
+	if b.failures >= b.policy.FailureThreshold {
+		b.state = StateOpen
+		b.openedAt = b.now()
+	}
+	return err
+}
+
+// checkTransitionLocked promotes an expired open state to half-open. Callers
+// must hold b.mu.
+func (b *Breaker) checkTransitionLocked(now time.Time) {
+	if b.state == StateOpen && now.Sub(b.openedAt) >= b.policy.OpenFor {
+		b.state = StateHalfOpen
+		b.probesInFlight = 0
+	}
 }
 
 // State is m05 p3 S1 (observation). AI will implement it during p3.
 func (b *Breaker) State() BreakerState {
-	panic("TODO: phase p3") // AI 将在 p3 S1 按上面的 why 边界实现。
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.checkTransitionLocked(b.now())
+	return b.state
 }
 
 // WritePathFailure is m05 p3 S3. AI will implement it during p3.
