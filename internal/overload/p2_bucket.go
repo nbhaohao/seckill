@@ -26,7 +26,16 @@ type TokenBucket struct {
 
 // NewTokenBucket is m05 p2 S1. AI will implement it during p2.
 func NewTokenBucket(capacity int, refillPerSecond float64, now func() time.Time) *TokenBucket {
-	panic("TODO: phase p2") // AI 将在 p2 S1 按上面的 why 边界实现。
+	if now == nil {
+		now = time.Now
+	}
+	return &TokenBucket{
+		capacity:        float64(capacity),
+		refillPerSecond: refillPerSecond,
+		tokens:          float64(capacity),
+		last:            now(),
+		now:             now,
+	}
 }
 
 // Allow is m05 p2 S2. AI will implement it during p2.
