@@ -16,10 +16,24 @@ func IndexOrder(ctx context.Context, rdb *redis.Client, orderID string, expiresA
 	}).Err()
 }
 
+var claimDueScript = redis.NewScript(`
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local batchSize = tonumber(ARGV[2])
+local newScore = tonumber(ARGV[3])
+
+local due = redis.call('ZRANGE', key, '-inf', now, 'BYSCORE', 'LIMIT', 0, batchSize)
+for _, member in ipairs(due) do
+	redis.call('ZADD', key, newScore, member)
+end
+return due
+`)
+
 // ClaimDue is sk-m5a p1 S2. AI 将在 p1 学习时分切片实现。
 //  1. 一段 Lua 在同一次原子执行中取出最多 batchSize 个到期 member。
 //  2. 领取的 member score 一律推后 claimExtension，两个 worker 才不会同时领到它。
 func ClaimDue(ctx context.Context, rdb *redis.Client, clock Clock, batchSize int, claimExtension time.Duration) ([]string, error) {
-	// TODO(sk-m5a-p1-s2): atomically ZRANGE BYSCORE LIMIT and push claimed scores forward.
-	panic("TODO: phase p1 claim due orders")
+	now := clock.Now()
+	newScore := now.Add(claimExtension).UnixMilli()
+	return claimDueScript.Run(ctx, rdb, []string{ExpireZSetKey}, now.UnixMilli(), batchSize, newScore).StringSlice()
 }
