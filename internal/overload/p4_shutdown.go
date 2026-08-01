@@ -2,6 +2,7 @@ package overload
 
 import (
 	"context"
+	"time"
 )
 
 // Shutdown is m05 p4. AI will implement it in two slices during p4.
@@ -15,5 +16,28 @@ import (
 //     an observable, reported stopping point (Failed + ErrShutdownTimeout)
 //     instead of a silent wedge with no evidence of where it hung.
 func Shutdown(ctx context.Context, steps []ShutdownStep) ShutdownReport {
-	panic("TODO: phase p4") // AI 将在 p4 S1+S2 按上面的 why 边界实现。
+	start := time.Now()
+	report := ShutdownReport{}
+
+	for _, step := range steps {
+		select {
+		case <-ctx.Done():
+			report.Failed = step.Name
+			report.Err = ErrShutdownTimeout
+			report.Elapsed = time.Since(start)
+			return report
+		default:
+		}
+
+		if err := step.Fn(ctx); err != nil {
+			report.Failed = step.Name
+			report.Err = err
+			report.Elapsed = time.Since(start)
+			return report
+		}
+		report.Completed = append(report.Completed, step.Name)
+	}
+
+	report.Elapsed = time.Since(start)
+	return report
 }
