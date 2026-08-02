@@ -11,8 +11,29 @@ import (
 //  1. 先读取这张订单对应的归还目标，再用 status=created 的条件更新争夺唯一关单权。
 //  2. RowsAffected 是 changed rows；只有 created -> closed 才会得到 1。
 func CloseCreatedOrder(ctx context.Context, db *sqlx.DB, orderID int64) (CloseResult, error) {
-	// TODO(sk-m5a-p2-s1): load compensation fields and conditionally transition created -> closed.
-	panic("TODO: phase p2 close created order")
+	var compensation struct {
+		ProductID int64 `db:"product_id"`
+		Quantity  int   `db:"quantity"`
+	}
+	if err := db.GetContext(ctx, &compensation, "SELECT product_id, quantity FROM orders WHERE id = ?", orderID); err != nil {
+		return CloseResult{}, err
+	}
+
+	res, err := db.ExecContext(ctx, "UPDATE orders SET status = ? WHERE id = ? AND status = ?", StatusClosed, orderID, StatusCreated)
+	if err != nil {
+		return CloseResult{}, err
+	}
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return CloseResult{}, err
+	}
+
+	return CloseResult{
+		OrderID:      orderID,
+		ProductID:    compensation.ProductID,
+		Quantity:     compensation.Quantity,
+		RowsAffected: rowsAffected,
+	}, nil
 }
 
 // RestoreClosedStock is sk-m5a p2 S2. AI 将在 p2 学习时分切片实现。
