@@ -26,7 +26,28 @@ import (
 //
 // 返回每个桶实际写进去的数量（下标 = 桶号），压测脚本和测试都靠它自证起点。
 func SpreadStock(ctx context.Context, rdb *redis.Client, db *sqlx.DB, productID int64, cfg Config) ([]int64, error) {
-	panic("TODO: phase p2 · S1 SpreadStock 尚未实现（AI 将在 p2 学习时分切片实现）")
+	var total int64
+	if err := db.GetContext(ctx, &total, "SELECT stock FROM products WHERE id = ?", productID); err != nil {
+		return nil, err
+	}
+
+	base := total / int64(cfg.BucketCount)
+	remainder := total % int64(cfg.BucketCount)
+	planned := make([]int64, cfg.BucketCount)
+	values := make(map[string]interface{}, cfg.BucketCount)
+	for b := 0; b < cfg.BucketCount; b++ {
+		qty := base
+		if int64(b) < remainder {
+			qty++
+		}
+		planned[b] = qty
+		values[StockKey(productID, b)] = qty
+	}
+
+	if err := rdb.MSet(ctx, values).Err(); err != nil {
+		return nil, err
+	}
+	return planned, nil
 }
 
 // TotalRemaining 是 p2 S2：一次读回 N 个桶的当前剩余，返回总和与逐桶明细。
