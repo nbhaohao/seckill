@@ -49,7 +49,7 @@ func RunScanner(ctx context.Context, clock Clock, scanInterval time.Duration, sc
 				return err
 			}
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil
 		}
 	}
 }
