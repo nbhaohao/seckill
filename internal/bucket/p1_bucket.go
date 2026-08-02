@@ -2,6 +2,7 @@ package bucket
 
 import (
 	"context"
+	"hash/fnv"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -22,7 +23,12 @@ import (
 //
 // bucketCount <= 0 时返回 0（退化成单桶，等价于 m03 的单 key 行为，不 panic）。
 func StartBucket(requestID string, bucketCount int) int {
-	panic("TODO: phase p1 · S1 StartBucket 尚未实现（AI 将在 p1 学习时分切片实现）")
+	if bucketCount <= 0 {
+		return 0
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(requestID))
+	return int(h.Sum32() % uint32(bucketCount))
 }
 
 // DeductWithProbe 是 p1 S2：从起始桶开始扣 qty，扣不到就往后探，探桶次数有显式上界。
