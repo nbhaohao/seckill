@@ -2,6 +2,7 @@ package bucket
 
 import (
 	"context"
+	"strconv"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/redis/go-redis/v9"
@@ -60,5 +61,27 @@ func SpreadStock(ctx context.Context, rdb *redis.Client, db *sqlx.DB, productID 
 // 「总数不是 0，请求却失败了」——只有总和的话，这句话只是个断言；
 // 有了逐桶明细，它才是一份能贴进 write-up 的证据。
 func TotalRemaining(ctx context.Context, rdb *redis.Client, productID int64, cfg Config) (int64, []int64, error) {
-	panic("TODO: phase p2 · S2 TotalRemaining 尚未实现（AI 将在 p2 学习时分切片实现）")
+	keys := make([]string, cfg.BucketCount)
+	for b := 0; b < cfg.BucketCount; b++ {
+		keys[b] = StockKey(productID, b)
+	}
+	vals, err := rdb.MGet(ctx, keys...).Result()
+	if err != nil {
+		return 0, nil, err
+	}
+
+	perBucket := make([]int64, cfg.BucketCount)
+	var total int64
+	for b, v := range vals {
+		if v == nil {
+			continue
+		}
+		n, err := strconv.ParseInt(v.(string), 10, 64)
+		if err != nil {
+			return 0, nil, err
+		}
+		perBucket[b] = n
+		total += n
+	}
+	return total, perBucket, nil
 }
