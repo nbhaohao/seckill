@@ -2,6 +2,7 @@ package expire
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/redis/go-redis/v9"
@@ -50,6 +51,5 @@ func RestoreClosedStock(ctx context.Context, rdb *redis.Client, result CloseResu
 // RemoveProcessedExpiry is sk-m5a p2 S3. AI 将在 p2 学习时分切片实现。
 //  1. 状态处理与必要的库存归还都成功后，才从到期索引移除该订单。
 func RemoveProcessedExpiry(ctx context.Context, rdb *redis.Client, orderID int64) error {
-	// TODO(sk-m5a-p2-s3): remove the successfully processed member from ExpireZSetKey.
-	panic("TODO: phase p2 remove processed expiry")
+	return rdb.ZRem(ctx, ExpireZSetKey, fmt.Sprint(orderID)).Err()
 }
