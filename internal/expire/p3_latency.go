@@ -42,6 +42,14 @@ func Percentiles(samples []time.Duration, requested ...float64) ([]time.Duration
 //  1. 每个 scanInterval 触发一次有界 scan，clock 让等待在测试中可控。
 //  2. ctx 取消必须抢占等待并退出，才能接入 overload.Shutdown 的总 deadline。
 func RunScanner(ctx context.Context, clock Clock, scanInterval time.Duration, scan func(context.Context) error) error {
-	// TODO(sk-m5a-p3-s3): wait for injected ticks, scan, and stop promptly on ctx cancellation.
-	panic("TODO: phase p3 run expiry scanner")
+	for {
+		select {
+		case <-clock.After(scanInterval):
+			if err := scan(ctx); err != nil {
+				return err
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
