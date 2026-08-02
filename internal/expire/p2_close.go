@@ -5,6 +5,8 @@ import (
 
 	"github.com/jmoiron/sqlx"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/nbhaohao/go-seckill/internal/deduct"
 )
 
 // CloseCreatedOrder is sk-m5a p2 S1. AI 将在 p2 学习时分切片实现。
@@ -39,8 +41,10 @@ func CloseCreatedOrder(ctx context.Context, db *sqlx.DB, orderID int64) (CloseRe
 // RestoreClosedStock is sk-m5a p2 S2. AI 将在 p2 学习时分切片实现。
 //  1. RowsAffected=1 是唯一归还凭证；归还动作复用 deduct.RollbackPreDeduct。
 func RestoreClosedStock(ctx context.Context, rdb *redis.Client, result CloseResult) error {
-	// TODO(sk-m5a-p2-s2): restore exactly result.Quantity only for the winning transition.
-	panic("TODO: phase p2 restore closed stock")
+	if result.RowsAffected != 1 {
+		return nil
+	}
+	return deduct.RollbackPreDeduct(ctx, rdb, result.ProductID, result.Quantity)
 }
 
 // RemoveProcessedExpiry is sk-m5a p2 S3. AI 将在 p2 学习时分切片实现。
