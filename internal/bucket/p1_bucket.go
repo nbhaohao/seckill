@@ -2,9 +2,12 @@ package bucket
 
 import (
 	"context"
+	"errors"
 	"hash/fnv"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/nbhaohao/go-seckill/internal/order"
 )
 
 // ── sk-m5b p1 · 分桶扣减 + 探桶上界 ⭐（本模块课眼）─────────────────────────
@@ -45,7 +48,19 @@ func StartBucket(requestID string, bucketCount int) int {
 // 上界为什么必须显式：见 Config.MaxProbes 的注释。这里绝不允许写成
 // 「for i := 0; i < cfg.BucketCount; i++」这种「探到有货为止」的循环。
 func DeductWithProbe(ctx context.Context, rdb *redis.Client, cfg Config, productID int64, requestID string, qty int) (DeductResult, error) {
-	panic("TODO: phase p1 · S2 DeductWithProbe 尚未实现（AI 将在 p1 学习时分切片实现）")
+	start := StartBucket(requestID, cfg.BucketCount)
+	budget := 1 + cfg.MaxProbes
+	for i := 0; i < budget; i++ {
+		bucket := (start + i) % cfg.BucketCount
+		remaining, err := deductOneBucket(ctx, rdb, productID, bucket, qty)
+		if err == nil {
+			return DeductResult{Bucket: bucket, Remaining: remaining, Probes: i + 1}, nil
+		}
+		if !errors.Is(err, order.ErrInsufficientStock) {
+			return DeductResult{Bucket: -1}, err
+		}
+	}
+	return DeductResult{Bucket: -1}, order.ErrInsufficientStock
 }
 
 // RollbackToBucket 是 p1 S3：把 qty 还回**指定的那一个**桶（跑 rollbackBucketScript）。
