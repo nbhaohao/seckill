@@ -19,6 +19,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/twmb/franz-go/pkg/kgo"
 
+	stockbucket "github.com/nbhaohao/go-seckill/internal/bucket"
 	"github.com/nbhaohao/go-seckill/internal/cache"
 	"github.com/nbhaohao/go-seckill/internal/dbconn"
 	"github.com/nbhaohao/go-seckill/internal/deduct"
@@ -415,6 +416,48 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"warmed": id})
 	})
 
+	// ===== sk-m5b 分段库存：/debug/bucket/warm/:id 与 approach=bucket =====
+	// 单 key 版（approach=lua）一个字不动，分桶版是并排的第二条路径，
+	// loadtest_m5b.sh 用同一份 workload 轮流打这两条，before/after 才只剩一个变量。
+	// N 与 k 由查询参数覆盖，默认走 stockbucket.DefaultConfig()。
+	bucketCfgFrom := func(c *gin.Context) stockbucket.Config {
+		cfg := stockbucket.DefaultConfig()
+		if n, err := strconv.Atoi(c.Query("n")); err == nil && n > 0 {
+			cfg.BucketCount = n
+		}
+		if k, err := strconv.Atoi(c.Query("k")); err == nil && k >= 0 {
+			cfg.MaxProbes = k
+		}
+		return cfg
+	}
+	r.POST("/debug/bucket/warm/:id", func(c *gin.Context) {
+		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "bad id"})
+			return
+		}
+		cfg := bucketCfgFrom(c)
+		planned, err := stockbucket.SpreadStock(c.Request.Context(), rdb, db, id, cfg)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"warmed": id, "buckets": planned, "n": cfg.BucketCount, "k": cfg.MaxProbes})
+	})
+	r.GET("/debug/bucket/remaining/:id", func(c *gin.Context) {
+		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "bad id"})
+			return
+		}
+		total, perBucket, err := stockbucket.TotalRemaining(c.Request.Context(), rdb, id, bucketCfgFrom(c))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"total": total, "buckets": perBucket})
+	})
+
 	r.POST("/debug/orders/:approach", overloadGate, func(c *gin.Context) {
 		var body deductOrderBody
 		if err := c.ShouldBindJSON(&body); err != nil {
@@ -461,6 +504,8 @@ func main() {
 			o, err = deduct.PlaceOrderWithLock(ctx, rdb, db, node, req, deduct.DefaultLockOptions())
 		case "lua":
 			o, err = deduct.PlaceOrderWithPreDeduct(ctx, rdb, db, node, req)
+		case "bucket":
+			o, err = stockbucket.PlaceOrderWithBucketDeduct(ctx, rdb, db, node, bucketCfgFrom(c), req)
 		default:
 			c.JSON(http.StatusBadRequest, gin.H{"error": "unknown approach: " + approach})
 			return
