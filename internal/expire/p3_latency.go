@@ -8,8 +8,9 @@ import (
 // Record is sk-m5a p3 S1. AI 将在 p3 学习时分切片实现。
 //  1. 并发 worker 上报时必须保护样本集合，观测不能悄悄少记。
 func (c *LatencyCollector) Record(sample time.Duration) {
-	// TODO(sk-m5a-p3-s1): append one sample under the collector lock.
-	panic("TODO: phase p3 record close latency")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.samples = append(c.samples, sample)
 }
 
 // Percentiles is sk-m5a p3 S2. AI 将在 p3 学习时分切片实现。
