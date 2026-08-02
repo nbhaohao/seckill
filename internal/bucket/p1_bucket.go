@@ -71,5 +71,8 @@ func DeductWithProbe(ctx context.Context, rdb *redis.Client, cfg Config, product
 //
 // bucket < 0（DeductWithProbe 失败时的取值）视为「压根没扣过」，直接返回 nil，不发命令。
 func RollbackToBucket(ctx context.Context, rdb *redis.Client, productID int64, bucket int, qty int) error {
-	panic("TODO: phase p1 · S3 RollbackToBucket 尚未实现（AI 将在 p1 学习时分切片实现）")
+	if bucket < 0 {
+		return nil
+	}
+	return rollbackBucketScript.Run(ctx, rdb, []string{StockKey(productID, bucket)}, qty).Err()
 }
