@@ -57,10 +57,10 @@ func DeductWithProbe(ctx context.Context, rdb *redis.Client, cfg Config, product
 			return DeductResult{Bucket: bucket, Remaining: remaining, Probes: i + 1}, nil
 		}
 		if !errors.Is(err, order.ErrInsufficientStock) {
-			return DeductResult{Bucket: -1}, err
+			return DeductResult{Bucket: -1, Probes: i + 1}, err
 		}
 	}
-	return DeductResult{Bucket: -1}, order.ErrInsufficientStock
+	return DeductResult{Bucket: -1, Probes: budget}, order.ErrInsufficientStock
 }
 
 // RollbackToBucket 是 p1 S3：把 qty 还回**指定的那一个**桶（跑 rollbackBucketScript）。
