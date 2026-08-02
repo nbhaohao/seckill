@@ -2,6 +2,8 @@ package expire
 
 import (
 	"context"
+	"math"
+	"sort"
 	"time"
 )
 
@@ -16,8 +18,24 @@ func (c *LatencyCollector) Record(sample time.Duration) {
 // Percentiles is sk-m5a p3 S2. AI 将在 p3 学习时分切片实现。
 //  1. 对快照排序后用 nearest-rank 计算请求的分位点；空样本返回空结果。
 func Percentiles(samples []time.Duration, requested ...float64) ([]time.Duration, error) {
-	// TODO(sk-m5a-p3-s2): calculate nearest-rank percentiles without mutating caller data.
-	panic("TODO: phase p3 calculate close latency percentiles")
+	for _, p := range requested {
+		if p <= 0 || p > 1 {
+			return nil, ErrInvalidPercentile
+		}
+	}
+	if len(samples) == 0 {
+		return []time.Duration{}, nil
+	}
+
+	sorted := append([]time.Duration(nil), samples...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+
+	result := make([]time.Duration, len(requested))
+	for i, p := range requested {
+		rank := int(math.Ceil(p * float64(len(sorted))))
+		result[i] = sorted[rank-1]
+	}
+	return result, nil
 }
 
 // RunScanner is sk-m5a p3 S3. AI 将在 p3 学习时分切片实现。
