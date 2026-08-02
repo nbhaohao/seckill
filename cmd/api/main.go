@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -28,6 +29,7 @@ import (
 	"github.com/nbhaohao/go-seckill/internal/mq"
 	"github.com/nbhaohao/go-seckill/internal/order"
 	"github.com/nbhaohao/go-seckill/internal/overload"
+	"github.com/nbhaohao/go-seckill/internal/reconcile"
 	"github.com/nbhaohao/go-seckill/internal/redisconn"
 	"github.com/nbhaohao/go-seckill/internal/server"
 )
@@ -456,6 +458,101 @@ func main() {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"total": total, "buckets": perBucket})
+	})
+
+	// ===== sk-m5c 对账补偿：注入泄漏的下单入口 + 恒等式核对 + 手动触发对账 =====
+	// m05 冻结的 /debug/orders/async 一个字不动；带台账与崩溃开关的是并排的第二条路径，
+	// checks_m5c.sh 先用它压出泄漏，再调 /debug/reconcile/run 把账拉平。
+	leakSwitch := reconcile.NewCrashSwitch(0)
+	r.POST("/debug/reconcile/crash", func(c *gin.Context) {
+		n, err := strconv.ParseInt(c.DefaultQuery("n", "0"), 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "bad n"})
+			return
+		}
+		leakSwitch = reconcile.NewCrashSwitch(n)
+		c.JSON(http.StatusOK, gin.H{"armed": n})
+	})
+	r.POST("/debug/orders/async-ledger", overloadGate, func(c *gin.Context) {
+		var body deductOrderBody
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		requestID := body.RequestID
+		if requestID == "" {
+			id, err := node.NextID()
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			requestID = strconv.FormatInt(id, 10)
+		}
+		quantity := body.Quantity
+		if quantity == 0 {
+			quantity = 1
+		}
+		req := order.PlaceOrderRequest{RequestID: requestID, ProductID: body.ProductID, UserID: body.UserID, Quantity: quantity}
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+		defer cancel()
+
+		err := reconcile.EnqueueWithLedger(ctx, rdb, req, time.Now(), func(ctx context.Context, r order.PlaceOrderRequest) error {
+			value, err := json.Marshal(mq.OrderCreated{
+				RequestID: r.RequestID, ProductID: r.ProductID, UserID: r.UserID,
+				Quantity: r.Quantity, AcceptedAt: time.Now(),
+			})
+			if err != nil {
+				return err
+			}
+			return producer.ProduceSync(ctx, &kgo.Record{
+				Topic: orderTopic,
+				Key:   []byte(strconv.FormatInt(r.ProductID, 10)),
+				Value: value,
+			}).FirstErr()
+		}, leakSwitch)
+
+		switch {
+		case err == nil:
+			c.JSON(http.StatusAccepted, gin.H{"request_id": requestID, "status": "accepted"})
+		case errors.Is(err, reconcile.ErrSimulatedCrash):
+			// 注入的「进程死在这里」：库存已扣、消息没发、没人回滚，这一发就是泄漏本身。
+			c.JSON(http.StatusInternalServerError, gin.H{"request_id": requestID, "status": "crashed", "leaked": true})
+		case errors.Is(err, order.ErrInsufficientStock):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+	})
+	r.GET("/debug/reconcile/identity/:id", func(c *gin.Context) {
+		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "bad id"})
+			return
+		}
+		initial, err := strconv.ParseInt(c.DefaultQuery("initial", "0"), 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "bad initial"})
+			return
+		}
+		identity, err := reconcile.CheckIdentity(c.Request.Context(), rdb, db, id, initial)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"identity": identity, "holds": identity.Holds()})
+	})
+	r.POST("/debug/reconcile/run", func(c *gin.Context) {
+		window, err := time.ParseDuration(c.DefaultQuery("window", "3s"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "bad window"})
+			return
+		}
+		report, err := reconcile.ReconcileOnce(c.Request.Context(), rdb, db, window, time.Now())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error(), "report": report})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"window": window.String(), "report": report})
 	})
 
 	r.POST("/debug/orders/:approach", overloadGate, func(c *gin.Context) {
