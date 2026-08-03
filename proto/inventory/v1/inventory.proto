@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package seckill.inventory.v1;
+
+option go_package = "github.com/nbhaohao/go-seckill/internal/pb/inventoryv1";
+
+// InventoryService contains only the inventory read boundary exercised in p1.
+// Reservation/restore RPCs belong to the real cross-process split in p2.
+service InventoryService {
+  rpc GetProduct(GetProductRequest) returns (Product);
+}
+
+message GetProductRequest {
+  int64 id = 1;
+}
+
+message Product {
+  int64 id = 1;
+  string name = 2;
+  int32 stock = 3;
+}

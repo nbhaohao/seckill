@@ -3,7 +3,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"log"
@@ -20,10 +19,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/twmb/franz-go/pkg/kgo"
 
+	"github.com/nbhaohao/go-seckill/internal/adapter/inprocess"
 	stockbucket "github.com/nbhaohao/go-seckill/internal/bucket"
 	"github.com/nbhaohao/go-seckill/internal/cache"
 	"github.com/nbhaohao/go-seckill/internal/dbconn"
 	"github.com/nbhaohao/go-seckill/internal/deduct"
+	"github.com/nbhaohao/go-seckill/internal/gateway"
 	"github.com/nbhaohao/go-seckill/internal/idgen"
 	"github.com/nbhaohao/go-seckill/internal/metrics"
 	"github.com/nbhaohao/go-seckill/internal/mq"
@@ -59,13 +60,6 @@ func envFloatOr(key string, def float64) float64 {
 		}
 	}
 	return def
-}
-
-type placeOrderBody struct {
-	RequestID string `json:"request_id" binding:"required"`
-	ProductID int64  `json:"product_id" binding:"required"`
-	UserID    int64  `json:"user_id" binding:"required"`
-	Quantity  int    `json:"quantity" binding:"required"`
 }
 
 // deductOrderBody 是 m03 压测端点的入参：只有 product_id 必填。
@@ -188,6 +182,21 @@ func main() {
 		log.Fatalf("register cache metrics: %v", err)
 	}
 
+	// sk-m06 p1：进程形态仍是单体，只把冻结的业务 HTTP 路由改为依赖 ports。
+	// adapter 内部仍调用一期原函数；p2 才会替换为真正的 gRPC client。
+	orderPort := inprocess.NewOrderAdapter(
+		func(ctx context.Context, req order.PlaceOrderRequest) (*order.Order, error) {
+			return order.PlaceOrderTx(ctx, db, node, req)
+		},
+		func(ctx context.Context, requestID string) (*order.Order, error) {
+			var found order.Order
+			err := db.GetContext(ctx, &found, "SELECT id, product_id, user_id, request_id, quantity, status, created_at FROM orders WHERE request_id = ?", requestID)
+			return &found, err
+		},
+	)
+	inventoryPort := inprocess.NewInventoryAdapter(productCache.Get)
+	httpGateway := gateway.NewHTTP(orderPort, inventoryPort)
+
 	// ===== m05 过载治理层（p1 有界并发槽 + p2 令牌桶 + p3 熔断）=====
 	// admission 与 bucket 是两道独立的门（COURSE_SPEC 拍板）：bucket 管"允许多快进"，
 	// admission 管"系统同时敢答应做多少活"；两者都必须在 Redis 预扣/DB 写/Kafka produce
@@ -278,25 +287,7 @@ func main() {
 	// ===== m02 商品读路径：/products/:id 走缓存，/debug/products/:id/nocache 直连 DB =====
 	// 两个 handler 的 SQL 完全相同（都走 cache.SQLProductRepo.LoadProduct），
 	// 唯一差别就是前面有没有那层缓存——这才能让 p5 的 on/off 对比只剩一个变量。
-	r.GET("/products/:id", func(c *gin.Context) {
-		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "bad id"})
-			return
-		}
-		start := time.Now()
-		p, err := productCache.Get(c.Request.Context(), id)
-		metrics.ProductReads.WithLabelValues("cached").Inc()
-		metrics.ProductReadLatency.WithLabelValues("cached").Observe(time.Since(start).Seconds())
-		switch {
-		case err == nil:
-			c.JSON(http.StatusOK, p)
-		case errors.Is(err, cache.ErrProductNotFound):
-			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
-		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		}
-	})
+	r.GET("/products/:id", httpGateway.GetProduct)
 
 	r.GET("/debug/products/:id/nocache", func(c *gin.Context) {
 		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
@@ -369,37 +360,7 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"slept": seconds})
 	})
 
-	r.POST("/orders", overloadGate, func(c *gin.Context) {
-		var body placeOrderBody
-		if err := c.ShouldBindJSON(&body); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-		start := time.Now()
-		o, err := order.PlaceOrderTx(c.Request.Context(), db, node, order.PlaceOrderRequest{
-			RequestID: body.RequestID,
-			ProductID: body.ProductID,
-			UserID:    body.UserID,
-			Quantity:  body.Quantity,
-		})
-		switch {
-		case err == nil:
-			metrics.OrdersPlaced.WithLabelValues("success").Inc()
-			metrics.OrderLatency.WithLabelValues("success").Observe(time.Since(start).Seconds())
-			c.JSON(http.StatusOK, o)
-		case errors.Is(err, order.ErrInsufficientStock):
-			metrics.OrdersPlaced.WithLabelValues("insufficient_stock").Inc()
-			metrics.OrderLatency.WithLabelValues("insufficient_stock").Observe(time.Since(start).Seconds())
-			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
-		case errors.Is(err, order.ErrInvalidQuantity), errors.Is(err, order.ErrProductNotFound):
-			metrics.OrdersPlaced.WithLabelValues("error").Inc()
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		default:
-			metrics.OrdersPlaced.WithLabelValues("error").Inc()
-			metrics.OrderLatency.WithLabelValues("error").Observe(time.Since(start).Seconds())
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		}
-	})
+	r.POST("/orders", overloadGate, httpGateway.PlaceOrder)
 
 	// ===== m03 防超卖四方案：/debug/orders/:approach =====
 	// 四条路径做的是同一件业务（下一单），唯一差别是"扣库存"那一步用什么机制护住，
@@ -681,18 +642,7 @@ func main() {
 	})
 
 	// 202 之后的薄查询端点：没有完整订单状态机，DB 尚不可见时只返回 pending。
-	r.GET("/orders/requests/:requestID", func(c *gin.Context) {
-		var found order.Order
-		err := db.GetContext(c.Request.Context(), &found, "SELECT id, product_id, user_id, request_id, quantity, status, created_at FROM orders WHERE request_id = ?", c.Param("requestID"))
-		switch {
-		case err == nil:
-			c.JSON(http.StatusOK, found)
-		case errors.Is(err, sql.ErrNoRows):
-			c.JSON(http.StatusAccepted, gin.H{"request_id": c.Param("requestID"), "status": "pending"})
-		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		}
-	})
+	r.GET("/orders/requests/:requestID", httpGateway.GetOrderByRequestID)
 
 	cfg := server.DefaultServerConfig()
 	srv := server.NewProductionServer(envOr("HTTP_ADDR", ":8080"), r, db.DB, cfg)
