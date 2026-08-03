@@ -55,5 +55,23 @@ func EnqueueWithCrash(ctx context.Context, rdb *redis.Client, req order.PlaceOrd
 // 这个函数是本模块唯一的验收口径：p1 用它证明泄漏存在，p2 用同一个函数证明泄漏被补回来。
 // 两边用同一把尺子，对账「有没有真的生效」才不是自说自话。
 func CheckIdentity(ctx context.Context, rdb *redis.Client, db *sqlx.DB, productID int64, initialStock int64) (Identity, error) {
-	panic("TODO: phase p1 · S2 CheckIdentity 尚未实现（AI 将在 p1 学习时分切片实现）")
+	remaining, err := rdb.Get(ctx, deduct.StockKey(productID)).Int64()
+	if err != nil && err != redis.Nil {
+		return Identity{}, err
+	}
+
+	var dbOrdered int64
+	if err := db.GetContext(ctx, &dbOrdered,
+		`SELECT COALESCE(SUM(quantity), 0) FROM orders WHERE product_id = ?`, productID); err != nil {
+		return Identity{}, err
+	}
+
+	deducted := initialStock - remaining
+	return Identity{
+		InitialStock:   initialStock,
+		RedisRemaining: remaining,
+		RedisDeducted:  deducted,
+		DBOrdered:      dbOrdered,
+		Leaked:         deducted - dbOrdered,
+	}, nil
 }
