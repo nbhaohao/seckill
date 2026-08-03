@@ -18,15 +18,19 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/twmb/franz-go/pkg/kgo"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
+	_ "google.golang.org/grpc/balancer/roundrobin"
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/nbhaohao/go-seckill/internal/adapter/grpcclient"
 	"github.com/nbhaohao/go-seckill/internal/adapter/inprocess"
 	stockbucket "github.com/nbhaohao/go-seckill/internal/bucket"
 	"github.com/nbhaohao/go-seckill/internal/cache"
+	"github.com/nbhaohao/go-seckill/internal/canary"
 	"github.com/nbhaohao/go-seckill/internal/dbconn"
 	"github.com/nbhaohao/go-seckill/internal/deduct"
+	discovery "github.com/nbhaohao/go-seckill/internal/discovery/etcd"
 	"github.com/nbhaohao/go-seckill/internal/gateway"
 	"github.com/nbhaohao/go-seckill/internal/idgen"
 	rpcinterceptor "github.com/nbhaohao/go-seckill/internal/interceptor"
@@ -66,6 +70,17 @@ func envFloatOr(key string, def float64) float64 {
 		}
 	}
 	return def
+}
+
+// openOrderPool 已就位（AI 生成）：两个版本池各有独立 resolver、round_robin 与 p4 breaker 链。
+func openOrderPool(client *clientv3.Client, service string, breaker *overload.Breaker) (*grpc.ClientConn, error) {
+	return grpc.NewClient(
+		discovery.Scheme+":///"+service,
+		grpc.WithResolvers(discovery.NewBuilder(client, nil)),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultServiceConfig(`{"loadBalancingConfig":[{"round_robin":{}}]}`),
+		grpc.WithUnaryInterceptor(rpcinterceptor.UnaryBreaker(breaker)),
+	)
 }
 
 // deductOrderBody 是 m03 压测端点的入参：只有 product_id 必填。
@@ -204,21 +219,31 @@ func main() {
 	httpGateway := gateway.NewHTTP(orderPort, inventoryPort)
 	// p2 只把 /debug/orders/async 切到 order-service；POST /orders 继续走上面的
 	// in-process port，因为它的一期实现是跨 products/orders 的单个本地事务。
-	// 已就位（AI 生成）：入口到 order 的写调用只挂熔断，不自动重试整条异步下单。
-	breaker := overload.NewBreaker(overload.BreakerPolicy{
+	// 已就位（AI 生成）：v1/v2 是两个 etcd 逻辑服务前缀，且各自保留独立 p4 breaker。
+	breakerPolicy := overload.BreakerPolicy{
 		FailureThreshold: envIntOr("BREAKER_FAILURE_THRESHOLD", 5),
 		OpenFor:          time.Duration(envIntOr("BREAKER_OPEN_FOR_MS", 2000)) * time.Millisecond,
 		HalfOpenProbes:   envIntOr("BREAKER_HALFOPEN_PROBES", 1),
-	})
-	orderConn, err := grpc.NewClient(
-		envOr("ORDER_GRPC_ADDR", "127.0.0.1:9081"),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithUnaryInterceptor(rpcinterceptor.UnaryBreaker(breaker)),
-	)
-	if err != nil {
-		log.Fatalf("order grpc client: %v", err)
 	}
-	asyncOrderPort := grpcclient.NewOrderAdapter(orderv1.NewOrderServiceClient(orderConn))
+	breaker := overload.NewBreaker(breakerPolicy)
+	canaryBreaker := overload.NewBreaker(breakerPolicy)
+	etcdClient, err := clientv3.New(clientv3.Config{Endpoints: strings.Split(envOr("ETCD_ENDPOINTS", "127.0.0.1:2379"), ","), DialTimeout: 3 * time.Second})
+	if err != nil {
+		log.Fatalf("connect etcd: %v", err)
+	}
+	orderConn, err := openOrderPool(etcdClient, "order", breaker)
+	if err != nil {
+		log.Fatalf("order v1 grpc client: %v", err)
+	}
+	canaryOrderConn, err := openOrderPool(etcdClient, "order-canary", canaryBreaker)
+	if err != nil {
+		log.Fatalf("order v2 grpc client: %v", err)
+	}
+	asyncOrderPort := canary.NewRouter(
+		grpcclient.NewOrderAdapter(orderv1.NewOrderServiceClient(orderConn)),
+		grpcclient.NewOrderAdapter(orderv1.NewOrderServiceClient(canaryOrderConn)),
+		envIntOr("ORDER_CANARY_PERCENT", 0),
+	)
 
 	// ===== m05 过载治理层（p1 有界并发槽 + p2 令牌桶 + p3 熔断）=====
 	// admission 与 bucket 是两道独立的门（COURSE_SPEC 拍板）：bucket 管"允许多快进"，
@@ -700,6 +725,12 @@ func main() {
 				errs = append(errs, err)
 			}
 			if err := orderConn.Close(); err != nil {
+				errs = append(errs, err)
+			}
+			if err := canaryOrderConn.Close(); err != nil {
+				errs = append(errs, err)
+			}
+			if err := etcdClient.Close(); err != nil {
 				errs = append(errs, err)
 			}
 			return errors.Join(errs...)
