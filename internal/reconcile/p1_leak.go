@@ -6,6 +6,7 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/nbhaohao/go-seckill/internal/deduct"
 	"github.com/nbhaohao/go-seckill/internal/order"
 )
 
@@ -28,7 +29,17 @@ import (
 //  3. 没崩就调 produce；只有 produce 返回错误时才走 deduct.RollbackPreDeduct，
 //     这条路径与 m04 的 mq.EnqueueOrder 完全一致，本关不改它的语义
 func EnqueueWithCrash(ctx context.Context, rdb *redis.Client, req order.PlaceOrderRequest, produce ProduceFunc, crash *CrashSwitch) error {
-	panic("TODO: phase p1 · S1 EnqueueWithCrash 尚未实现（AI 将在 p1 学习时分切片实现）")
+	if _, err := deduct.PreDeduct(ctx, rdb, req.ProductID, req.Quantity); err != nil {
+		return err
+	}
+	if crash.Fire() {
+		return ErrSimulatedCrash
+	}
+	if err := produce(ctx, req); err != nil {
+		_ = deduct.RollbackPreDeduct(ctx, rdb, req.ProductID, req.Quantity)
+		return err
+	}
+	return nil
 }
 
 // CheckIdentity 是 p1 S2：把恒等式核成一个可打印的快照。
