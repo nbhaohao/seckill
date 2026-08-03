@@ -112,5 +112,32 @@ func ReconcileEntry(ctx context.Context, rdb *redis.Client, db *sqlx.DB, e Entry
 // 对账 job 挂在 overload.Shutdown 的总 deadline 下，它必须能在中途停手；
 // 已完成的部分是安全的，因为每条的归还与结案本身就是原子的。
 func ReconcileOnce(ctx context.Context, rdb *redis.Client, db *sqlx.DB, window time.Duration, now time.Time) (Report, error) {
-	panic("TODO: phase p2 · S3 ReconcileOnce 尚未实现（AI 将在 p2 学习时分切片实现）")
+	entries, err := ScanLedger(ctx, rdb, 100)
+	if err != nil {
+		return Report{}, err
+	}
+
+	var report Report
+	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return report, err
+		}
+		outcome, err := ReconcileEntry(ctx, rdb, db, e, window, now)
+		if err != nil {
+			return report, err
+		}
+		report.Scanned++
+		switch outcome {
+		case OutcomeRefunded:
+			report.Refunded++
+			report.RefundedQty += int64(e.Quantity)
+		case OutcomeYoung:
+			report.Young++
+		case OutcomeSettled:
+			report.Settled++
+		case OutcomeAlreadyReconciled:
+			report.AlreadyReconciled++
+		}
+	}
+	return report, nil
 }
