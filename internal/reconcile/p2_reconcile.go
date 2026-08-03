@@ -7,6 +7,7 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/nbhaohao/go-seckill/internal/deduct"
 	"github.com/nbhaohao/go-seckill/internal/order"
 )
 
@@ -37,7 +38,24 @@ import (
 // 但没有缩到零：进程仍可能死在第 1 步和第 2 步中间。彻底消掉它要求台账与预扣写在同一段
 // Lua 里，那会改动 m03 已冻结的预扣脚本，本课不做——这个残留窗口写进 write-up 里。
 func EnqueueWithLedger(ctx context.Context, rdb *redis.Client, req order.PlaceOrderRequest, now time.Time, produce ProduceFunc, crash *CrashSwitch) error {
-	panic("TODO: phase p2 · S1 EnqueueWithLedger 尚未实现（AI 将在 p2 学习时分切片实现）")
+	if _, err := deduct.PreDeduct(ctx, rdb, req.ProductID, req.Quantity); err != nil {
+		return err
+	}
+	if err := RecordPreDeduct(ctx, rdb, req, now); err != nil {
+		return err
+	}
+	if crash.Fire() {
+		return ErrSimulatedCrash
+	}
+	if err := produce(ctx, req); err != nil {
+		_ = deduct.RollbackPreDeduct(ctx, rdb, req.ProductID, req.Quantity)
+		entry := Entry{RequestID: req.RequestID, ProductID: req.ProductID, Quantity: req.Quantity, CreatedAt: now, State: LedgerPending}
+		if _, sErr := settleEntry(ctx, rdb, entry, 0); sErr != nil {
+			return sErr
+		}
+		return err
+	}
+	return nil
 }
 
 // ReconcileEntry 是 p2 S2：对**一条**台账给出终局判定。
