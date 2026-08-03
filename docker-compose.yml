@@ -53,5 +53,29 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       CLUSTER_ID: seckill-dev-cluster
 
+  etcd:
+    image: quay.io/coreos/etcd:v3.7.1
+    restart: unless-stopped
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://127.0.0.1:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://127.0.0.1:2380
+      - --initial-cluster=etcd=http://127.0.0.1:2380
+      - --initial-cluster-state=new
+    ports:
+      - "2379:2379"
+    volumes:
+      - etcd-data:/etcd-data
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
 volumes:
   mysql-data:
+  etcd-data:

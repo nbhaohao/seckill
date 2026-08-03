@@ -1,4 +1,4 @@
-// 已就位（AI 生成）：静态地址、gRPC server 与优雅关闭是 p2 样板；学习点在 adapter 映射。
+// 已就位（AI 生成）：p3 通过 etcd resolver + 内建 round_robin 发现 inventory。
 package main
 
 import (
@@ -15,12 +15,15 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
+	_ "google.golang.org/grpc/balancer/roundrobin"
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/nbhaohao/go-seckill/internal/adapter/grpcclient"
 	grpcadapter "github.com/nbhaohao/go-seckill/internal/adapter/grpcserver"
 	"github.com/nbhaohao/go-seckill/internal/asyncorder"
+	discovery "github.com/nbhaohao/go-seckill/internal/discovery/etcd"
 	"github.com/nbhaohao/go-seckill/internal/mq"
 	inventoryv1 "github.com/nbhaohao/go-seckill/internal/pb/inventoryv1"
 	orderv1 "github.com/nbhaohao/go-seckill/internal/pb/orderv1"
@@ -35,7 +38,17 @@ func envOr(key, fallback string) string {
 }
 
 func main() {
-	inventoryConn, err := grpc.NewClient(envOr("INVENTORY_GRPC_ADDR", "127.0.0.1:9082"), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	etcdClient, err := clientv3.New(clientv3.Config{Endpoints: strings.Split(envOr("ETCD_ENDPOINTS", "127.0.0.1:2379"), ","), DialTimeout: 3 * time.Second})
+	if err != nil {
+		log.Fatalf("connect etcd: %v", err)
+	}
+	defer etcdClient.Close()
+	resolverBuilder := discovery.NewBuilder(etcdClient, nil)
+	inventoryConn, err := grpc.NewClient(discovery.Scheme+":///inventory",
+		grpc.WithResolvers(resolverBuilder),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultServiceConfig(`{"loadBalancingConfig":[{"round_robin":{}}]}`),
+	)
 	if err != nil {
 		log.Fatalf("inventory grpc client: %v", err)
 	}

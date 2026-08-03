@@ -1,4 +1,4 @@
-// 已就位（AI 生成）：依赖接线、gRPC server 与优雅关闭是 p2 样板；学习点在 adapter 映射。
+// 已就位（AI 生成）：p3 把监听地址注册到 etcd；注册机制本身留在 discovery scaffold。
 package main
 
 import (
@@ -9,14 +9,19 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
 
 	grpcadapter "github.com/nbhaohao/go-seckill/internal/adapter/grpcserver"
 	"github.com/nbhaohao/go-seckill/internal/cache"
 	"github.com/nbhaohao/go-seckill/internal/dbconn"
+	discovery "github.com/nbhaohao/go-seckill/internal/discovery/etcd"
 	"github.com/nbhaohao/go-seckill/internal/inventory"
 	inventoryv1 "github.com/nbhaohao/go-seckill/internal/pb/inventoryv1"
 	"github.com/nbhaohao/go-seckill/internal/redisconn"
@@ -60,6 +65,21 @@ func main() {
 	}
 	server := grpc.NewServer()
 	inventoryv1.RegisterInventoryServiceServer(server, grpcadapter.NewInventoryServer(service, service))
+	healthServer := health.NewServer()
+	grpc_health_v1.RegisterHealthServer(server, healthServer)
+	healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
+
+	etcdClient, err := clientv3.New(clientv3.Config{Endpoints: strings.Split(envOr("ETCD_ENDPOINTS", "127.0.0.1:2379"), ","), DialTimeout: 3 * time.Second})
+	if err != nil {
+		log.Fatalf("connect etcd: %v", err)
+	}
+	defer etcdClient.Close()
+	hostname, _ := os.Hostname()
+	instanceID := envOr("INVENTORY_INSTANCE_ID", hostname+"-"+strconv.Itoa(os.Getpid()))
+	registration, err := discovery.Register(context.Background(), etcdClient, "inventory", instanceID, envOr("INVENTORY_ADVERTISE_ADDR", "127.0.0.1:9082"), int64(envIntOr("ETCD_LEASE_TTL", 10)))
+	if err != nil {
+		log.Fatalf("register inventory: %v", err)
+	}
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve(lis) }()
@@ -69,6 +89,12 @@ func main() {
 	defer stop()
 	select {
 	case <-sigCtx.Done():
+		healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
+		revokeCtx, revokeCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		if err := registration.Close(revokeCtx); err != nil {
+			log.Printf("revoke inventory registration: %v", err)
+		}
+		revokeCancel()
 		force := time.AfterFunc(10*time.Second, server.Stop)
 		server.GracefulStop()
 		force.Stop()
