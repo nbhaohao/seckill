@@ -29,6 +29,7 @@ import (
 	"github.com/nbhaohao/go-seckill/internal/deduct"
 	"github.com/nbhaohao/go-seckill/internal/gateway"
 	"github.com/nbhaohao/go-seckill/internal/idgen"
+	rpcinterceptor "github.com/nbhaohao/go-seckill/internal/interceptor"
 	"github.com/nbhaohao/go-seckill/internal/metrics"
 	"github.com/nbhaohao/go-seckill/internal/mq"
 	"github.com/nbhaohao/go-seckill/internal/order"
@@ -203,7 +204,17 @@ func main() {
 	httpGateway := gateway.NewHTTP(orderPort, inventoryPort)
 	// p2 只把 /debug/orders/async 切到 order-service；POST /orders 继续走上面的
 	// in-process port，因为它的一期实现是跨 products/orders 的单个本地事务。
-	orderConn, err := grpc.NewClient(envOr("ORDER_GRPC_ADDR", "127.0.0.1:9081"), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// 已就位（AI 生成）：入口到 order 的写调用只挂熔断，不自动重试整条异步下单。
+	breaker := overload.NewBreaker(overload.BreakerPolicy{
+		FailureThreshold: envIntOr("BREAKER_FAILURE_THRESHOLD", 5),
+		OpenFor:          time.Duration(envIntOr("BREAKER_OPEN_FOR_MS", 2000)) * time.Millisecond,
+		HalfOpenProbes:   envIntOr("BREAKER_HALFOPEN_PROBES", 1),
+	})
+	orderConn, err := grpc.NewClient(
+		envOr("ORDER_GRPC_ADDR", "127.0.0.1:9081"),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithUnaryInterceptor(rpcinterceptor.UnaryBreaker(breaker)),
+	)
 	if err != nil {
 		log.Fatalf("order grpc client: %v", err)
 	}
@@ -222,12 +233,6 @@ func main() {
 		envFloatOr("RATE_LIMIT_REFILL_PER_SECOND", 200),
 		nil, // nil 时 TokenBucket 内部退回 time.Now，生产环境不用操心传时钟。
 	)
-	breaker := overload.NewBreaker(overload.BreakerPolicy{
-		FailureThreshold: envIntOr("BREAKER_FAILURE_THRESHOLD", 5),
-		OpenFor:          time.Duration(envIntOr("BREAKER_OPEN_FOR_MS", 2000)) * time.Millisecond,
-		HalfOpenProbes:   envIntOr("BREAKER_HALFOPEN_PROBES", 1),
-	})
-
 	admissionOutcomes := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "seckill_admission_outcomes_total",
 		Help: "m05 p1 有界并发槽的结果计数（outcome=accepted|rejected）。",
@@ -601,31 +606,12 @@ func main() {
 	})
 
 	// m04 异步接单：Redis 预扣 + Kafka broker ack 后立刻 202，DB 落单由上面的 consumer 完成。
-	// m05 p3：EnqueueOrder 套 breaker.Do——它包的是"Kafka 这个远程依赖调用"，
-	// 不包业务结果，所以 ErrInsufficientStock 在 fn 内部被拦下来单独记，不喂给
-	// breaker 的失败计数（拍板：卖光了不是依赖故障）。Breaker Open 时必须走
-	// WritePathFailure 返回失败状态码，绝不能把"没敢发 Kafka"伪造成 202。
+	// sk-m06 p4 把同一个 breaker 下沉到 order gRPC client interceptor：业务 status 不计故障，
+	// transport/过载错误才推动状态机；Open 返回明确失败，仍由 AsyncHTTP fail closed。
 	asyncWithBreaker := gateway.AsyncOrderFunc(func(ctx context.Context, req ports.PlaceOrderRequest) (*ports.AcceptedOrder, error) {
 		produceCtx, produceCancel := context.WithTimeout(ctx, 3*time.Second)
 		defer produceCancel()
-		var accepted *ports.AcceptedOrder
-		var bizErr error
-		breakerErr := breaker.Do(produceCtx, func(callCtx context.Context) error {
-			var err error
-			accepted, err = asyncOrderPort.PlaceOrderAsync(callCtx, req)
-			if errors.Is(err, ports.ErrInsufficientStock) {
-				bizErr = err
-				return nil
-			}
-			return err
-		})
-		if bizErr != nil {
-			return nil, bizErr
-		}
-		if breakerErr != nil {
-			return nil, breakerErr
-		}
-		return accepted, nil
+		return asyncOrderPort.PlaceOrderAsync(produceCtx, req)
 	})
 	r.POST("/debug/orders/async", overloadGate, gateway.NewAsyncHTTP(asyncWithBreaker, gateway.Int64RequestID(node.NextID)).PlaceOrder)
 

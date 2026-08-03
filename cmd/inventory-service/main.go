@@ -1,4 +1,4 @@
-// 已就位（AI 生成）：p3 把监听地址注册到 etcd；注册机制本身留在 discovery scaffold。
+// 已就位（AI 生成）：p4 在 inventory 写 RPC 前接一期令牌桶，health/readiness 不争 token。
 package main
 
 import (
@@ -22,7 +22,9 @@ import (
 	"github.com/nbhaohao/go-seckill/internal/cache"
 	"github.com/nbhaohao/go-seckill/internal/dbconn"
 	discovery "github.com/nbhaohao/go-seckill/internal/discovery/etcd"
+	rpcinterceptor "github.com/nbhaohao/go-seckill/internal/interceptor"
 	"github.com/nbhaohao/go-seckill/internal/inventory"
+	"github.com/nbhaohao/go-seckill/internal/overload"
 	inventoryv1 "github.com/nbhaohao/go-seckill/internal/pb/inventoryv1"
 	"github.com/nbhaohao/go-seckill/internal/redisconn"
 )
@@ -63,7 +65,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen inventory grpc: %v", err)
 	}
-	server := grpc.NewServer()
+	serverBucket := overload.NewTokenBucket(
+		envIntOr("INVENTORY_RPC_RATE_LIMIT_CAPACITY", 500),
+		float64(envIntOr("INVENTORY_RPC_RATE_LIMIT_REFILL_PER_SECOND", 500)),
+		nil,
+	)
+	server := grpc.NewServer(grpc.UnaryInterceptor(rpcinterceptor.UnaryRateLimit(serverBucket, map[string]bool{
+		inventoryv1.InventoryService_Reserve_FullMethodName: true,
+		inventoryv1.InventoryService_Restore_FullMethodName: true,
+	})))
 	inventoryv1.RegisterInventoryServiceServer(server, grpcadapter.NewInventoryServer(service, service))
 	healthServer := health.NewServer()
 	grpc_health_v1.RegisterHealthServer(server, healthServer)
