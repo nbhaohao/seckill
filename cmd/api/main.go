@@ -18,7 +18,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/nbhaohao/go-seckill/internal/adapter/grpcclient"
 	"github.com/nbhaohao/go-seckill/internal/adapter/inprocess"
 	stockbucket "github.com/nbhaohao/go-seckill/internal/bucket"
 	"github.com/nbhaohao/go-seckill/internal/cache"
@@ -30,6 +33,8 @@ import (
 	"github.com/nbhaohao/go-seckill/internal/mq"
 	"github.com/nbhaohao/go-seckill/internal/order"
 	"github.com/nbhaohao/go-seckill/internal/overload"
+	orderv1 "github.com/nbhaohao/go-seckill/internal/pb/orderv1"
+	"github.com/nbhaohao/go-seckill/internal/ports"
 	"github.com/nbhaohao/go-seckill/internal/reconcile"
 	"github.com/nbhaohao/go-seckill/internal/redisconn"
 	"github.com/nbhaohao/go-seckill/internal/server"
@@ -196,6 +201,13 @@ func main() {
 	)
 	inventoryPort := inprocess.NewInventoryAdapter(productCache.Get)
 	httpGateway := gateway.NewHTTP(orderPort, inventoryPort)
+	// p2 只把 /debug/orders/async 切到 order-service；POST /orders 继续走上面的
+	// in-process port，因为它的一期实现是跨 products/orders 的单个本地事务。
+	orderConn, err := grpc.NewClient(envOr("ORDER_GRPC_ADDR", "127.0.0.1:9081"), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		log.Fatalf("order grpc client: %v", err)
+	}
+	asyncOrderPort := grpcclient.NewOrderAdapter(orderv1.NewOrderServiceClient(orderConn))
 
 	// ===== m05 过载治理层（p1 有界并发槽 + p2 令牌桶 + p3 熔断）=====
 	// admission 与 bucket 是两道独立的门（COURSE_SPEC 拍板）：bucket 管"允许多快进"，
@@ -593,53 +605,29 @@ func main() {
 	// 不包业务结果，所以 ErrInsufficientStock 在 fn 内部被拦下来单独记，不喂给
 	// breaker 的失败计数（拍板：卖光了不是依赖故障）。Breaker Open 时必须走
 	// WritePathFailure 返回失败状态码，绝不能把"没敢发 Kafka"伪造成 202。
-	r.POST("/debug/orders/async", overloadGate, func(c *gin.Context) {
-		var body deductOrderBody
-		if err := c.ShouldBindJSON(&body); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-		requestID := body.RequestID
-		if requestID == "" {
-			id, err := node.NextID()
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-				return
-			}
-			requestID = strconv.FormatInt(id, 10)
-		}
-		quantity := body.Quantity
-		if quantity == 0 {
-			quantity = 1
-		}
-		produceCtx, produceCancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	asyncWithBreaker := gateway.AsyncOrderFunc(func(ctx context.Context, req ports.PlaceOrderRequest) (*ports.AcceptedOrder, error) {
+		produceCtx, produceCancel := context.WithTimeout(ctx, 3*time.Second)
 		defer produceCancel()
-
-		var accepted *mq.AcceptedOrder
+		var accepted *ports.AcceptedOrder
 		var bizErr error
-		breakerErr := breaker.Do(produceCtx, func(ctx context.Context) error {
-			a, err := mq.EnqueueOrder(ctx, rdb, producer, orderTopic, order.PlaceOrderRequest{RequestID: requestID, ProductID: body.ProductID, UserID: body.UserID, Quantity: quantity})
-			if errors.Is(err, order.ErrInsufficientStock) {
+		breakerErr := breaker.Do(produceCtx, func(callCtx context.Context) error {
+			var err error
+			accepted, err = asyncOrderPort.PlaceOrderAsync(callCtx, req)
+			if errors.Is(err, ports.ErrInsufficientStock) {
 				bizErr = err
-				return nil // 业务结果，不算 Kafka 调用失败，不喂给熔断器计数。
+				return nil
 			}
-			accepted = a
 			return err
 		})
-
-		switch {
-		case errors.Is(breakerErr, overload.ErrBreakerOpen):
-			status, payload := overload.WritePathFailure(overload.ErrBreakerOpen)
-			c.JSON(status, payload)
-		case bizErr != nil:
-			c.JSON(http.StatusConflict, gin.H{"error": bizErr.Error()})
-		case breakerErr != nil:
-			status, payload := overload.WritePathFailure(breakerErr)
-			c.JSON(status, payload)
-		default:
-			c.JSON(http.StatusAccepted, gin.H{"request_id": accepted.RequestID, "status": "accepted"})
+		if bizErr != nil {
+			return nil, bizErr
 		}
+		if breakerErr != nil {
+			return nil, breakerErr
+		}
+		return accepted, nil
 	})
+	r.POST("/debug/orders/async", overloadGate, gateway.NewAsyncHTTP(asyncWithBreaker, gateway.Int64RequestID(node.NextID)).PlaceOrder)
 
 	// 202 之后的薄查询端点：没有完整订单状态机，DB 尚不可见时只返回 pending。
 	r.GET("/orders/requests/:requestID", httpGateway.GetOrderByRequestID)
@@ -723,6 +711,9 @@ func main() {
 				errs = append(errs, err)
 			}
 			if err := db.Close(); err != nil {
+				errs = append(errs, err)
+			}
+			if err := orderConn.Close(); err != nil {
 				errs = append(errs, err)
 			}
 			return errors.Join(errs...)

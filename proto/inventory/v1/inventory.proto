@@ -4,10 +4,12 @@ package seckill.inventory.v1;
 
 option go_package = "github.com/nbhaohao/go-seckill/internal/pb/inventoryv1";
 
-// InventoryService contains only the inventory read boundary exercised in p1.
-// Reservation/restore RPCs belong to the real cross-process split in p2.
+// InventoryService keeps the p1 read boundary and adds the p2 reservation
+// boundary used by the real async order path.
 service InventoryService {
   rpc GetProduct(GetProductRequest) returns (Product);
+  rpc Reserve(ReserveRequest) returns (Reservation);
+  rpc Restore(RestoreRequest) returns (RestoreResponse);
 }
 
 message GetProductRequest {
@@ -18,4 +20,28 @@ message Product {
   int64 id = 1;
   string name = 2;
   int32 stock = 3;
+}
+
+message ReserveRequest {
+  string request_id = 1;
+  int64 product_id = 2;
+  int32 quantity = 3;
+}
+
+message Reservation {
+  string request_id = 1;
+  int64 product_id = 2;
+  int32 quantity = 3;
+  int64 remaining = 4;
+  bool already_reserved = 5;
+}
+
+message RestoreRequest {
+  string request_id = 1;
+  int64 product_id = 2;
+  int32 quantity = 3;
+}
+
+message RestoreResponse {
+  bool restored = 1;
 }

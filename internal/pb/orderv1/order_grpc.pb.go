@@ -20,6 +20,7 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	OrderService_PlaceOrder_FullMethodName          = "/seckill.order.v1.OrderService/PlaceOrder"
+	OrderService_PlaceOrderAsync_FullMethodName     = "/seckill.order.v1.OrderService/PlaceOrderAsync"
 	OrderService_GetOrderByRequestID_FullMethodName = "/seckill.order.v1.OrderService/GetOrderByRequestID"
 )
 
@@ -31,6 +32,7 @@ const (
 // in-process adapter; the generated gRPC surface is not started until p2.
 type OrderServiceClient interface {
 	PlaceOrder(ctx context.Context, in *PlaceOrderRequest, opts ...grpc.CallOption) (*Order, error)
+	PlaceOrderAsync(ctx context.Context, in *PlaceOrderRequest, opts ...grpc.CallOption) (*AcceptedOrder, error)
 	GetOrderByRequestID(ctx context.Context, in *GetOrderByRequestIDRequest, opts ...grpc.CallOption) (*GetOrderByRequestIDResponse, error)
 }
 
@@ -46,6 +48,16 @@ func (c *orderServiceClient) PlaceOrder(ctx context.Context, in *PlaceOrderReque
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Order)
 	err := c.cc.Invoke(ctx, OrderService_PlaceOrder_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *orderServiceClient) PlaceOrderAsync(ctx context.Context, in *PlaceOrderRequest, opts ...grpc.CallOption) (*AcceptedOrder, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AcceptedOrder)
+	err := c.cc.Invoke(ctx, OrderService_PlaceOrderAsync_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -70,6 +82,7 @@ func (c *orderServiceClient) GetOrderByRequestID(ctx context.Context, in *GetOrd
 // in-process adapter; the generated gRPC surface is not started until p2.
 type OrderServiceServer interface {
 	PlaceOrder(context.Context, *PlaceOrderRequest) (*Order, error)
+	PlaceOrderAsync(context.Context, *PlaceOrderRequest) (*AcceptedOrder, error)
 	GetOrderByRequestID(context.Context, *GetOrderByRequestIDRequest) (*GetOrderByRequestIDResponse, error)
 	mustEmbedUnimplementedOrderServiceServer()
 }
@@ -83,6 +96,9 @@ type UnimplementedOrderServiceServer struct{}
 
 func (UnimplementedOrderServiceServer) PlaceOrder(context.Context, *PlaceOrderRequest) (*Order, error) {
 	return nil, status.Error(codes.Unimplemented, "method PlaceOrder not implemented")
+}
+func (UnimplementedOrderServiceServer) PlaceOrderAsync(context.Context, *PlaceOrderRequest) (*AcceptedOrder, error) {
+	return nil, status.Error(codes.Unimplemented, "method PlaceOrderAsync not implemented")
 }
 func (UnimplementedOrderServiceServer) GetOrderByRequestID(context.Context, *GetOrderByRequestIDRequest) (*GetOrderByRequestIDResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetOrderByRequestID not implemented")
@@ -126,6 +142,24 @@ func _OrderService_PlaceOrder_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _OrderService_PlaceOrderAsync_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PlaceOrderRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrderServiceServer).PlaceOrderAsync(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrderService_PlaceOrderAsync_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrderServiceServer).PlaceOrderAsync(ctx, req.(*PlaceOrderRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _OrderService_GetOrderByRequestID_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetOrderByRequestIDRequest)
 	if err := dec(in); err != nil {
@@ -154,6 +188,10 @@ var OrderService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PlaceOrder",
 			Handler:    _OrderService_PlaceOrder_Handler,
+		},
+		{
+			MethodName: "PlaceOrderAsync",
+			Handler:    _OrderService_PlaceOrderAsync_Handler,
 		},
 		{
 			MethodName: "GetOrderByRequestID",

@@ -32,12 +32,34 @@ type Product struct {
 	Stock int    `json:"stock"`
 }
 
+type AcceptedOrder struct {
+	RequestID string
+	Status    int
+	Accepted  time.Time
+}
+
+type ReservationRequest struct {
+	RequestID string
+	ProductID int64
+	Quantity  int
+}
+
+type Reservation struct {
+	RequestID       string
+	ProductID       int64
+	Quantity        int
+	Remaining       int64
+	AlreadyReserved bool
+}
+
 var (
-	ErrInsufficientStock = errors.New("order: insufficient stock")
-	ErrProductNotFound   = errors.New("order: product not found")
-	ErrInvalidQuantity   = errors.New("order: quantity must be positive")
-	ErrOrderNotFound     = errors.New("order: not found")
-	ErrCachedProductMiss = errors.New("cache: product not found")
+	ErrInsufficientStock   = errors.New("order: insufficient stock")
+	ErrProductNotFound     = errors.New("order: product not found")
+	ErrInvalidQuantity     = errors.New("order: quantity must be positive")
+	ErrOrderNotFound       = errors.New("order: not found")
+	ErrCachedProductMiss   = errors.New("cache: product not found")
+	ErrReservationConflict = errors.New("inventory: request id reused with different reservation")
+	ErrReservationNotFound = errors.New("inventory: reservation not found")
 )
 
 type OrderService interface {
@@ -47,4 +69,16 @@ type OrderService interface {
 
 type InventoryService interface {
 	GetProduct(context.Context, int64) (*Product, error)
+}
+
+// AsyncOrderService is deliberately separate from OrderService: POST /orders
+// remains the phase-one local transaction, while /debug/orders/async is the
+// boundary that can be split without inventing a distributed transaction.
+type AsyncOrderService interface {
+	PlaceOrderAsync(context.Context, PlaceOrderRequest) (*AcceptedOrder, error)
+}
+
+type InventoryReservationService interface {
+	Reserve(context.Context, ReservationRequest) (*Reservation, error)
+	Restore(context.Context, ReservationRequest) error
 }

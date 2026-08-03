@@ -278,6 +278,66 @@ func (x *Order) GetCreatedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+type AcceptedOrder struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RequestId     string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	Status        int32                  `protobuf:"varint,2,opt,name=status,proto3" json:"status,omitempty"`
+	AcceptedAt    *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=accepted_at,json=acceptedAt,proto3" json:"accepted_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AcceptedOrder) Reset() {
+	*x = AcceptedOrder{}
+	mi := &file_order_v1_order_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AcceptedOrder) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AcceptedOrder) ProtoMessage() {}
+
+func (x *AcceptedOrder) ProtoReflect() protoreflect.Message {
+	mi := &file_order_v1_order_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AcceptedOrder.ProtoReflect.Descriptor instead.
+func (*AcceptedOrder) Descriptor() ([]byte, []int) {
+	return file_order_v1_order_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *AcceptedOrder) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *AcceptedOrder) GetStatus() int32 {
+	if x != nil {
+		return x.Status
+	}
+	return 0
+}
+
+func (x *AcceptedOrder) GetAcceptedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.AcceptedAt
+	}
+	return nil
+}
+
 var File_order_v1_order_proto protoreflect.FileDescriptor
 
 const file_order_v1_order_proto_rawDesc = "" +
@@ -306,10 +366,17 @@ const file_order_v1_order_proto_rawDesc = "" +
 	"\bquantity\x18\x05 \x01(\x05R\bquantity\x12\x16\n" +
 	"\x06status\x18\x06 \x01(\tR\x06status\x129\n" +
 	"\n" +
-	"created_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt2\xce\x01\n" +
+	"created_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\x83\x01\n" +
+	"\rAcceptedOrder\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12\x16\n" +
+	"\x06status\x18\x02 \x01(\x05R\x06status\x12;\n" +
+	"\vaccepted_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"acceptedAt2\xa7\x02\n" +
 	"\fOrderService\x12J\n" +
 	"\n" +
-	"PlaceOrder\x12#.seckill.order.v1.PlaceOrderRequest\x1a\x17.seckill.order.v1.Order\x12r\n" +
+	"PlaceOrder\x12#.seckill.order.v1.PlaceOrderRequest\x1a\x17.seckill.order.v1.Order\x12W\n" +
+	"\x0fPlaceOrderAsync\x12#.seckill.order.v1.PlaceOrderRequest\x1a\x1f.seckill.order.v1.AcceptedOrder\x12r\n" +
 	"\x13GetOrderByRequestID\x12,.seckill.order.v1.GetOrderByRequestIDRequest\x1a-.seckill.order.v1.GetOrderByRequestIDResponseB4Z2github.com/nbhaohao/go-seckill/internal/pb/orderv1b\x06proto3"
 
 var (
@@ -324,26 +391,30 @@ func file_order_v1_order_proto_rawDescGZIP() []byte {
 	return file_order_v1_order_proto_rawDescData
 }
 
-var file_order_v1_order_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_order_v1_order_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
 var file_order_v1_order_proto_goTypes = []any{
 	(*PlaceOrderRequest)(nil),           // 0: seckill.order.v1.PlaceOrderRequest
 	(*GetOrderByRequestIDRequest)(nil),  // 1: seckill.order.v1.GetOrderByRequestIDRequest
 	(*GetOrderByRequestIDResponse)(nil), // 2: seckill.order.v1.GetOrderByRequestIDResponse
 	(*Order)(nil),                       // 3: seckill.order.v1.Order
-	(*timestamppb.Timestamp)(nil),       // 4: google.protobuf.Timestamp
+	(*AcceptedOrder)(nil),               // 4: seckill.order.v1.AcceptedOrder
+	(*timestamppb.Timestamp)(nil),       // 5: google.protobuf.Timestamp
 }
 var file_order_v1_order_proto_depIdxs = []int32{
 	3, // 0: seckill.order.v1.GetOrderByRequestIDResponse.order:type_name -> seckill.order.v1.Order
-	4, // 1: seckill.order.v1.Order.created_at:type_name -> google.protobuf.Timestamp
-	0, // 2: seckill.order.v1.OrderService.PlaceOrder:input_type -> seckill.order.v1.PlaceOrderRequest
-	1, // 3: seckill.order.v1.OrderService.GetOrderByRequestID:input_type -> seckill.order.v1.GetOrderByRequestIDRequest
-	3, // 4: seckill.order.v1.OrderService.PlaceOrder:output_type -> seckill.order.v1.Order
-	2, // 5: seckill.order.v1.OrderService.GetOrderByRequestID:output_type -> seckill.order.v1.GetOrderByRequestIDResponse
-	4, // [4:6] is the sub-list for method output_type
-	2, // [2:4] is the sub-list for method input_type
-	2, // [2:2] is the sub-list for extension type_name
-	2, // [2:2] is the sub-list for extension extendee
-	0, // [0:2] is the sub-list for field type_name
+	5, // 1: seckill.order.v1.Order.created_at:type_name -> google.protobuf.Timestamp
+	5, // 2: seckill.order.v1.AcceptedOrder.accepted_at:type_name -> google.protobuf.Timestamp
+	0, // 3: seckill.order.v1.OrderService.PlaceOrder:input_type -> seckill.order.v1.PlaceOrderRequest
+	0, // 4: seckill.order.v1.OrderService.PlaceOrderAsync:input_type -> seckill.order.v1.PlaceOrderRequest
+	1, // 5: seckill.order.v1.OrderService.GetOrderByRequestID:input_type -> seckill.order.v1.GetOrderByRequestIDRequest
+	3, // 6: seckill.order.v1.OrderService.PlaceOrder:output_type -> seckill.order.v1.Order
+	4, // 7: seckill.order.v1.OrderService.PlaceOrderAsync:output_type -> seckill.order.v1.AcceptedOrder
+	2, // 8: seckill.order.v1.OrderService.GetOrderByRequestID:output_type -> seckill.order.v1.GetOrderByRequestIDResponse
+	6, // [6:9] is the sub-list for method output_type
+	3, // [3:6] is the sub-list for method input_type
+	3, // [3:3] is the sub-list for extension type_name
+	3, // [3:3] is the sub-list for extension extendee
+	0, // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_order_v1_order_proto_init() }
@@ -357,7 +428,7 @@ func file_order_v1_order_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_order_v1_order_proto_rawDesc), len(file_order_v1_order_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   4,
+			NumMessages:   5,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

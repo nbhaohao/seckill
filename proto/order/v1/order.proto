@@ -10,6 +10,7 @@ import "google/protobuf/timestamp.proto";
 // in-process adapter; the generated gRPC surface is not started until p2.
 service OrderService {
   rpc PlaceOrder(PlaceOrderRequest) returns (Order);
+  rpc PlaceOrderAsync(PlaceOrderRequest) returns (AcceptedOrder);
   rpc GetOrderByRequestID(GetOrderByRequestIDRequest) returns (GetOrderByRequestIDResponse);
 }
 
@@ -37,4 +38,10 @@ message Order {
   int32 quantity = 5;
   string status = 6;
   google.protobuf.Timestamp created_at = 7;
+}
+
+message AcceptedOrder {
+  string request_id = 1;
+  int32 status = 2;
+  google.protobuf.Timestamp accepted_at = 3;
 }
