@@ -74,7 +74,33 @@ func EnqueueWithLedger(ctx context.Context, rdb *redis.Client, req order.PlaceOr
 // settleEntry 返回 false 表示这条台账刚被另一个对账进程结案了，本次没有产生任何副作用——
 // 照实返回 OutcomeAlreadyReconciled，别把它算进退款数。
 func ReconcileEntry(ctx context.Context, rdb *redis.Client, db *sqlx.DB, e Entry, window time.Duration, now time.Time) (Outcome, error) {
-	panic("TODO: phase p2 · S2 ReconcileEntry 尚未实现（AI 将在 p2 学习时分切片实现）")
+	if e.State != LedgerPending {
+		return OutcomeAlreadyReconciled, nil
+	}
+	if now.Sub(e.CreatedAt) < window {
+		return OutcomeYoung, nil
+	}
+
+	var orderCount int
+	if err := db.GetContext(ctx, &orderCount, `SELECT COUNT(*) FROM orders WHERE request_id = ?`, e.RequestID); err != nil {
+		return "", err
+	}
+
+	refundQty := e.Quantity
+	outcome := OutcomeRefunded
+	if orderCount > 0 {
+		refundQty = 0
+		outcome = OutcomeSettled
+	}
+
+	ok, err := settleEntry(ctx, rdb, e, refundQty)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return OutcomeAlreadyReconciled, nil
+	}
+	return outcome, nil
 }
 
 // ReconcileOnce 是 p2 S3：跑完整一轮对账，返回可以贴进 write-up 的账单。
