@@ -25,6 +25,7 @@ import (
 	"github.com/nbhaohao/go-seckill/internal/adapter/grpcclient"
 	grpcadapter "github.com/nbhaohao/go-seckill/internal/adapter/grpcserver"
 	"github.com/nbhaohao/go-seckill/internal/asyncorder"
+	"github.com/nbhaohao/go-seckill/internal/dbconn"
 	discovery "github.com/nbhaohao/go-seckill/internal/discovery/etcd"
 	rpcinterceptor "github.com/nbhaohao/go-seckill/internal/interceptor"
 	"github.com/nbhaohao/go-seckill/internal/mq"
@@ -32,6 +33,7 @@ import (
 	inventoryv1 "github.com/nbhaohao/go-seckill/internal/pb/inventoryv1"
 	orderv1 "github.com/nbhaohao/go-seckill/internal/pb/orderv1"
 	"github.com/nbhaohao/go-seckill/internal/ports"
+	"github.com/nbhaohao/go-seckill/internal/shard"
 )
 
 func envOr(key, fallback string) string {
@@ -82,6 +84,21 @@ func v2FaultInterceptor(version, mode string, delay time.Duration) grpc.UnarySer
 func main() {
 	version := envOr("ORDER_VERSION", "v1")
 	serviceName, defaultListen, defaultAdvertise := orderPool(version)
+	// 已就位（AI 生成）：order-service 独占同一 MySQL 实例中的四个订单 schema 连接池；
+	// gateway 与 inventory-service 不接触这些连接，因此分片拓扑不会越过服务边界。
+	orderPools, err := shard.OpenPools(dbconn.Config{
+		Host:     envOr("DB_HOST", "127.0.0.1"),
+		Port:     envIntOr("DB_PORT", 3306),
+		User:     envOr("DB_USER", "seckill"),
+		Password: envOr("DB_PASSWORD", "seckill"),
+	})
+	if err != nil {
+		log.Fatalf("connect order shards: %v", err)
+	}
+	defer shard.ClosePools(orderPools)
+	orderShardStore := shard.NewStore(orderPools, nil)
+	_ = orderShardStore // p7 学习完成后由 order 持久化/查询 adapter 调用，连接生命周期已在本进程就位。
+
 	etcdClient, err := clientv3.New(clientv3.Config{Endpoints: strings.Split(envOr("ETCD_ENDPOINTS", "127.0.0.1:2379"), ","), DialTimeout: 3 * time.Second})
 	if err != nil {
 		log.Fatalf("connect etcd: %v", err)
