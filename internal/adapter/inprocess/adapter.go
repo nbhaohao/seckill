@@ -2,6 +2,7 @@ package inprocess
 
 import (
 	"context"
+	"errors"
 
 	"github.com/nbhaohao/go-seckill/internal/cache"
 	"github.com/nbhaohao/go-seckill/internal/order"
@@ -36,7 +37,33 @@ func NewInventoryAdapter(get GetProductFunc) *InventoryAdapter {
 // 2. 为什么保留错误语义：gateway 仍靠错误类别输出一期冻结的 HTTP status 与 error body。
 // AI 将在 p1 学习时分切片实现。
 func (a *OrderAdapter) PlaceOrder(ctx context.Context, req ports.PlaceOrderRequest) (*ports.Order, error) {
-	panic("TODO: sk-m06 p1 OrderAdapter.PlaceOrder")
+	o, err := a.place(ctx, order.PlaceOrderRequest{
+		RequestID: req.RequestID,
+		ProductID: req.ProductID,
+		UserID:    req.UserID,
+		Quantity:  req.Quantity,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, order.ErrInsufficientStock):
+			return nil, ports.ErrInsufficientStock
+		case errors.Is(err, order.ErrProductNotFound):
+			return nil, ports.ErrProductNotFound
+		case errors.Is(err, order.ErrInvalidQuantity):
+			return nil, ports.ErrInvalidQuantity
+		default:
+			return nil, err
+		}
+	}
+	return &ports.Order{
+		ID:        o.ID,
+		ProductID: o.ProductID,
+		UserID:    o.UserID,
+		RequestID: o.RequestID,
+		Quantity:  o.Quantity,
+		Status:    o.Status,
+		CreatedAt: o.CreatedAt,
+	}, nil
 }
 
 // GetOrderByRequestID 是 sk-m06 p1 S2：通过注入的查单函数读取一期订单，并区分 pending 与系统错误。
