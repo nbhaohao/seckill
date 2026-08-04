@@ -95,5 +95,16 @@ func (a *OrderAdapter) GetOrderByRequestID(ctx context.Context, requestID string
 // 2. 为什么映射成 ports.Product：后续换成本地或 RPC adapter 时，gateway 无需跟着改类型。
 // AI 将在 p1 学习时分切片实现。
 func (a *InventoryAdapter) GetProduct(ctx context.Context, id int64) (*ports.Product, error) {
-	panic("TODO: sk-m06 p1 InventoryAdapter.GetProduct")
+	p, err := a.get(ctx, id)
+	if err != nil {
+		if errors.Is(err, cache.ErrProductNotFound) {
+			return nil, ports.ErrCachedProductMiss
+		}
+		return nil, err
+	}
+	return &ports.Product{
+		ID:    p.ID,
+		Name:  p.Name,
+		Stock: p.Stock,
+	}, nil
 }
