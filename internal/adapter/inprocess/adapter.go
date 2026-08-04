@@ -2,6 +2,7 @@ package inprocess
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 
 	"github.com/nbhaohao/go-seckill/internal/cache"
@@ -71,7 +72,22 @@ func (a *OrderAdapter) PlaceOrder(ctx context.Context, req ports.PlaceOrderReque
 // 2. 为什么返回完整 Order：一期成功查询的 JSON 字段与大小写必须逐字保持。
 // AI 将在 p1 学习时分切片实现。
 func (a *OrderAdapter) GetOrderByRequestID(ctx context.Context, requestID string) (*ports.Order, error) {
-	panic("TODO: sk-m06 p1 OrderAdapter.GetOrderByRequestID")
+	o, err := a.find(ctx, requestID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ports.ErrOrderNotFound
+		}
+		return nil, err
+	}
+	return &ports.Order{
+		ID:        o.ID,
+		ProductID: o.ProductID,
+		UserID:    o.UserID,
+		RequestID: o.RequestID,
+		Quantity:  o.Quantity,
+		Status:    o.Status,
+		CreatedAt: o.CreatedAt,
+	}, nil
 }
 
 // GetProduct 是 sk-m06 p1 S3：把一期缓存读路径包在 inventory port 后，并保持 not-found 分类。
