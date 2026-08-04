@@ -14,6 +14,7 @@ import (
 	"github.com/nbhaohao/go-seckill/internal/adapter/inprocess"
 	"github.com/nbhaohao/go-seckill/internal/cache"
 	"github.com/nbhaohao/go-seckill/internal/order"
+	"github.com/nbhaohao/go-seckill/internal/ports"
 )
 
 func TestM06P1PostOrdersHTTPContractUnchanged(t *testing.T) {
@@ -37,6 +38,29 @@ func TestM06P1PostOrdersHTTPContractUnchanged(t *testing.T) {
 	t.Logf("POST /orders status=%d body=%s", rec.Code, rec.Body.String())
 	if rec.Code != http.StatusOK || gotBody != wantBody {
 		t.Fatalf("POST /orders HTTP contract must stay frozen: request_id=%q want_status=%d got_status=%d want_body=%s got_body=%s", "req-p1", http.StatusOK, rec.Code, wantBody, gotBody)
+	}
+}
+
+func TestM06P1InsufficientStockKeeps409(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	orders := inprocess.NewOrderAdapter(
+		func(context.Context, order.PlaceOrderRequest) (*order.Order, error) {
+			return nil, order.ErrInsufficientStock
+		},
+		func(context.Context, string) (*order.Order, error) { return nil, nil },
+	)
+	r := gin.New()
+	r.POST("/orders", NewHTTP(orders, inprocess.NewInventoryAdapter(nil)).PlaceOrder)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/orders", strings.NewReader(`{"request_id":"req-oos","product_id":42,"user_id":7,"quantity":2}`))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(rec, req)
+
+	wantBody := `{"error":"order: insufficient stock"}`
+	gotBody := strings.TrimSpace(rec.Body.String())
+	t.Logf("POST /orders (insufficient stock) status=%d body=%s ports_text=%q order_text=%q", rec.Code, rec.Body.String(), ports.ErrInsufficientStock.Error(), order.ErrInsufficientStock.Error())
+	if rec.Code != http.StatusConflict || gotBody != wantBody {
+		t.Fatalf("insufficient stock must stay HTTP 409 across the new port boundary: request_id=%q want_status=%d got_status=%d want_body=%s got_body=%s", "req-oos", http.StatusConflict, rec.Code, wantBody, gotBody)
 	}
 }
 
