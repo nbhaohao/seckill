@@ -61,7 +61,28 @@ func (s *InventoryServer) GetProduct(ctx context.Context, req *inventoryv1.GetPr
 // 3. 为什么必须返回实际 remaining/alreadyReserved：测试与调用方需要观察幂等是否真的生效。
 // AI 将在 p2 学习时分切片实现。
 func (s *InventoryServer) Reserve(ctx context.Context, req *inventoryv1.ReserveRequest) (*inventoryv1.Reservation, error) {
-	panic("TODO: sk-m06 p2 InventoryServer.Reserve")
+	r, err := s.reservations.Reserve(ctx, ports.ReservationRequest{
+		RequestID: req.GetRequestId(),
+		ProductID: req.GetProductId(),
+		Quantity:  int(req.GetQuantity()),
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, ports.ErrInsufficientStock):
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			return nil, status.FromContextError(err).Err()
+		default:
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+	}
+	return &inventoryv1.Reservation{
+		RequestId:       r.RequestID,
+		ProductId:       r.ProductID,
+		Quantity:        int32(r.Quantity),
+		Remaining:       r.Remaining,
+		AlreadyReserved: r.AlreadyReserved,
+	}, nil
 }
 
 // Restore 已就位（AI 生成）：补偿映射是 Reserve 失败路径的机械对偶，学习预算留给 Reserve 与跨跳 status。
