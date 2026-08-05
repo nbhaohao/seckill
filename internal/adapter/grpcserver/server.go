@@ -31,7 +31,25 @@ func NewOrderServer(async ports.AsyncOrderService) *OrderServer {
 // 3. 为什么未知错误 fail closed：网络/下游状态不确定时绝不能构造 AcceptedOrder 假装 202。
 // AI 将在 p2 学习时分切片实现。
 func (s *OrderServer) PlaceOrderAsync(ctx context.Context, req *orderv1.PlaceOrderRequest) (*orderv1.AcceptedOrder, error) {
-	panic("TODO: sk-m06 p2 OrderServer.PlaceOrderAsync")
+	a, err := s.async.PlaceOrderAsync(ctx, ports.PlaceOrderRequest{
+		RequestID: req.GetRequestId(),
+		ProductID: req.GetProductId(),
+		UserID:    req.GetUserId(),
+		Quantity:  int(req.GetQuantity()),
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, ports.ErrInsufficientStock):
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
+		case errors.Is(err, ports.ErrInvalidQuantity):
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			return nil, status.FromContextError(err).Err()
+		default:
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+	}
+	return acceptedProto(a), nil
 }
 
 type InventoryServer struct {
