@@ -25,7 +25,31 @@ func NewOrderAdapter(client orderv1.OrderServiceClient) *OrderAdapter {
 // 3. 为什么 Unavailable/DeadlineExceeded 保持失败：下游结果不确定时不得伪造 AcceptedOrder。
 // AI 将在 p2 学习时分切片实现。
 func (a *OrderAdapter) PlaceOrderAsync(ctx context.Context, req ports.PlaceOrderRequest) (*ports.AcceptedOrder, error) {
-	panic("TODO: sk-m06 p2 grpcclient.OrderAdapter.PlaceOrderAsync")
+	got, err := a.client.PlaceOrderAsync(ctx, &orderv1.PlaceOrderRequest{
+		RequestId: req.RequestID,
+		ProductId: req.ProductID,
+		UserId:    req.UserID,
+		Quantity:  int32(req.Quantity),
+	})
+	if err != nil {
+		switch status.Code(err) {
+		case codes.FailedPrecondition:
+			return nil, ports.ErrInsufficientStock
+		case codes.InvalidArgument:
+			return nil, ports.ErrInvalidQuantity
+		case codes.Canceled:
+			return nil, context.Canceled
+		case codes.DeadlineExceeded:
+			return nil, context.DeadlineExceeded
+		default:
+			return nil, err
+		}
+	}
+	return &ports.AcceptedOrder{
+		RequestID: got.GetRequestId(),
+		Status:    int(got.GetStatus()),
+		Accepted:  got.GetAcceptedAt().AsTime(),
+	}, nil
 }
 
 type InventoryAdapter struct {
